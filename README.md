@@ -29,23 +29,15 @@ Building from source also requires Meson, Ninja, pkg-config, a C compiler, and t
 
 ## Usage
 
-Build and run from the repository checkout:
-
-```sh
-meson setup build
-meson compile -C build
-./nm-sidebar
-```
-
 The default command is `--toggle`. Additional commands are:
 
 ```sh
-./nm-sidebar --toggle
-./nm-sidebar --show
-./nm-sidebar --hide
-./nm-sidebar --quit
-./nm-sidebar --reload-css
-./nm-sidebar --background
+nm-sidebar --toggle
+nm-sidebar --show
+nm-sidebar --hide
+nm-sidebar --quit
+nm-sidebar --reload-css
+nm-sidebar --background
 ```
 
 `--show`, `--hide`, `--quit`, `--reload-css`, and the default `--toggle` send commands to an existing background process over a Unix socket. `--background` verifies an existing instance or starts one without showing the sidebar. If no running process is available, `--toggle`, `--show`, and `--background` start the GTK app. `--reload-css` requires an existing running instance.
@@ -57,7 +49,7 @@ The socket is created at `$XDG_RUNTIME_DIR/nm-sidebar.sock`, with a fallback und
 Point a Waybar module at the executable, for example:
 
 ```json
-"on-click": "/path/to/Network_Manager_Sidebar/nm-sidebar --toggle"
+"on-click": "nm-sidebar --toggle"
 ```
 
 Use `--background` from your session startup if you want the command server running before the first click.
@@ -76,7 +68,6 @@ Native packages rely on distro-provided GLib, GTK4, libadwaita 1.3 or newer, Net
 
 ## Project Layout
 
-- `nm-sidebar`: checkout launcher for the Meson-built native CLI.
 - `src/cli/`: native command-line parsing, IPC probing, and GUI helper startup.
 - `src/core/`: command socket protocol, IPC paths, IPC commands, and target-output helpers.
 - `src/gui/`: GTK application lifecycle, command server, layer-shell anchoring, and styles.
@@ -91,21 +82,16 @@ Network Manager Sidebar is licensed under the GNU General Public License v3.0 or
 
 ## Development
 
-There is currently no test-suite configuration. Use the focused checks below after edits.
+Configure the local development build once:
 
 ```sh
-meson setup build
-meson compile -C build
-build/nm-sidebar --help
+meson setup build --prefix=/usr --libdir=lib --buildtype=debugoptimized
 ```
 
-Build a native package locally with nFPM:
+There is currently no test-suite configuration. After each change, rebuild, install, and run the focused CLI check:
 
 ```sh
-rm -rf build-package package-root dist
-meson setup build-package --prefix=/usr --libdir=lib --buildtype=release
-meson compile -C build-package
-DESTDIR="$PWD/package-root" meson install -C build-package
-mkdir -p dist
-PACKAGE_VERSION=0.0.0 PACKAGE_RELEASE=1 PACKAGE_ARCH=amd64 PACKAGE_HOMEPAGE=https://github.com/Relz/network-manager-sidebar nfpm package --config packaging/nfpm.yaml --packager deb --target dist/
+meson compile -C build
+sudo meson install -C build
+nm-sidebar --help
 ```
