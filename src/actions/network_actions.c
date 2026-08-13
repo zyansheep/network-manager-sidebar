@@ -216,6 +216,21 @@ password_key_mgmt(NMAccessPoint *ap, NMRemoteConnection *existing)
   return "wpa-psk";
 }
 
+static const char *
+wifi_connection_mode(NMAccessPoint *ap)
+{
+  switch (nm_access_point_get_mode(ap)) {
+  case NM_802_11_MODE_ADHOC:
+    return NM_SETTING_WIRELESS_MODE_ADHOC;
+  case NM_802_11_MODE_INFRA:
+    return NM_SETTING_WIRELESS_MODE_INFRA;
+  case NM_802_11_MODE_MESH:
+    return NM_SETTING_WIRELESS_MODE_MESH;
+  default:
+    return NULL;
+  }
+}
+
 static NMConnection *
 create_wifi_connection(NMAccessPoint *ap, const char *password, char **out_uuid)
 {
@@ -227,6 +242,7 @@ create_wifi_connection(NMAccessPoint *ap, const char *password, char **out_uuid)
   NMSetting *s_ip4 = nm_setting_ip4_config_new();
   NMSetting *s_ip6 = nm_setting_ip6_config_new();
   GBytes *ssid_bytes = nm_access_point_get_ssid(ap);
+  const char *mode = wifi_connection_mode(ap);
 
   g_object_set(s_con,
                NM_SETTING_CONNECTION_ID, ssid,
@@ -234,7 +250,10 @@ create_wifi_connection(NMAccessPoint *ap, const char *password, char **out_uuid)
                NM_SETTING_CONNECTION_TYPE, NM_SETTING_WIRELESS_SETTING_NAME,
                NM_SETTING_CONNECTION_AUTOCONNECT, TRUE,
                NULL);
-  g_object_set(s_wifi, NM_SETTING_WIRELESS_SSID, ssid_bytes, NULL);
+  g_object_set(s_wifi,
+               NM_SETTING_WIRELESS_SSID, ssid_bytes,
+               NM_SETTING_WIRELESS_MODE, mode,
+               NULL);
   g_object_set(s_ip4, NM_SETTING_IP_CONFIG_METHOD, NM_SETTING_IP4_CONFIG_METHOD_AUTO, NULL);
   g_object_set(s_ip6, NM_SETTING_IP_CONFIG_METHOD, NM_SETTING_IP6_CONFIG_METHOD_AUTO, NULL);
 
@@ -995,7 +1014,6 @@ add_and_activate_wifi(NetworkSidebarActions *actions, NMDeviceWifi *device, NMAc
   g_autofree char *ssid = network_sidebar_ap_ssid_text(ap);
   g_autofree char *uuid = NULL;
   g_autoptr(NMConnection) connection = NULL;
-  const char *ap_path = nm_object_get_path(NM_OBJECT(ap));
   AsyncAction *async;
 
   connection = create_wifi_connection(ap, password, &uuid);
@@ -1010,11 +1028,11 @@ add_and_activate_wifi(NetworkSidebarActions *actions, NMDeviceWifi *device, NMAc
     g_autofree char *message = g_strdup_printf("Connecting to %s...", ssid);
     toast(actions, message);
   }
-  /* Keep the saved profile SSID-based, but target this AP for the activation. */
+  /* The profile's security limits eligible APs; NetworkManager chooses the best BSSID. */
   nm_client_add_and_activate_connection_async(actions->client,
                                               connection,
                                               NM_DEVICE(device),
-                                              ap_path,
+                                              NULL,
                                               NULL,
                                               add_and_activate_wifi_finish_cb,
                                               async);
@@ -1087,13 +1105,12 @@ on_password_text_changed(GObject *object, GParamSpec *pspec, gpointer user_data)
 }
 
 void
-network_sidebar_actions_activate_saved_wifi_profile_for_ap(NetworkSidebarActions *actions,
-                                                           NMRemoteConnection *connection,
-                                                           NMDeviceWifi *device,
-                                                           NMAccessPoint *ap)
+network_sidebar_actions_activate_saved_wifi_profile_on_device(NetworkSidebarActions *actions,
+                                                              NMRemoteConnection *connection,
+                                                              NMDeviceWifi *device,
+                                                              NMAccessPoint *ap)
 {
   g_autofree char *name = network_sidebar_connection_name(NM_CONNECTION(connection), "Wi-Fi");
-  const char *ap_path = nm_object_get_path(NM_OBJECT(ap));
   AsyncAction *async = async_action_new(actions, name);
 
   async->is_wifi = TRUE;
@@ -1105,11 +1122,11 @@ network_sidebar_actions_activate_saved_wifi_profile_for_ap(NetworkSidebarActions
     g_autofree char *message = g_strdup_printf("Connecting %s...", name);
     toast(actions, message);
   }
-  /* Selecting an AP row should target that AP/BSSID for this activation. */
+  /* Profile constraints still apply while NetworkManager chooses the best matching BSSID. */
   nm_client_activate_connection_async(actions->client,
                                       NM_CONNECTION(connection),
                                       NM_DEVICE(device),
-                                      ap_path,
+                                      NULL,
                                       NULL,
                                       activate_finish_cb,
                                       async);
@@ -1179,7 +1196,7 @@ commit_password_finish_cb(GObject *source, GAsyncResult *result, gpointer user_d
     return;
   }
 
-  network_sidebar_actions_activate_saved_wifi_profile_for_ap(data->actions, data->saved_wifi, data->device, data->ap);
+  network_sidebar_actions_activate_saved_wifi_profile_on_device(data->actions, data->saved_wifi, data->device, data->ap);
   schedule_refresh(data->actions, 500);
   password_dialog_data_free(data);
 }
@@ -1302,54 +1319,10 @@ prompt_wifi_password(NetworkSidebarActions *actions,
   adw_alert_dialog_choose(ADW_ALERT_DIALOG(dialog), GTK_WIDGET(actions->parent), NULL, password_dialog_chosen_cb, data);
 }
 
-static gint
-saved_wifi_connection_compare(gconstpointer left, gconstpointer right)
-{
-  NMRemoteConnection *left_connection = *(NMRemoteConnection * const *) left;
-  NMRemoteConnection *right_connection = *(NMRemoteConnection * const *) right;
-  const char *left_id = nm_connection_get_id(NM_CONNECTION(left_connection));
-  const char *right_id = nm_connection_get_id(NM_CONNECTION(right_connection));
-  g_autofree char *left_folded = g_utf8_casefold(left_id != NULL ? left_id : "", -1);
-  g_autofree char *right_folded = g_utf8_casefold(right_id != NULL ? right_id : "", -1);
-
-  return g_strcmp0(left_folded, right_folded);
-}
-
-static GPtrArray *
-saved_wifi_connections_for_ap(NetworkSidebarActions *actions, NMDeviceWifi *device, NMAccessPoint *ap)
-{
-  const GPtrArray *connections = nm_client_get_connections(actions->client);
-  GPtrArray *matches = g_ptr_array_new_with_free_func(g_object_unref);
-
-  for (guint i = 0; connections != NULL && i < connections->len; i++) {
-    NMRemoteConnection *connection = g_ptr_array_index((GPtrArray *) connections, i);
-    NMConnection *nm_connection = NM_CONNECTION(connection);
-    if (g_strcmp0(nm_connection_get_connection_type(nm_connection), NM_SETTING_WIRELESS_SETTING_NAME) != 0)
-      continue;
-    if (nm_device_connection_valid(NM_DEVICE(device), nm_connection) && nm_access_point_connection_valid(ap, nm_connection))
-      g_ptr_array_add(matches, g_object_ref(connection));
-  }
-  g_ptr_array_sort(matches, saved_wifi_connection_compare);
-  return matches;
-}
-
 void
 network_sidebar_actions_connect_wifi(NetworkSidebarActions *actions, NMDeviceWifi *device, NMAccessPoint *ap)
 {
-  g_autoptr(GPtrArray) saved = saved_wifi_connections_for_ap(actions, device, ap);
   const char *editor_args[] = { "--create", "--type=802-11-wireless", NULL };
-
-  if (saved->len == 1) {
-    NMRemoteConnection *connection = g_ptr_array_index(saved, 0);
-    network_sidebar_actions_activate_saved_wifi_profile_for_ap(actions, connection, device, ap);
-    return;
-  }
-  if (saved->len > 1) {
-    g_autofree char *ssid = network_sidebar_ap_ssid_text(ap);
-    g_autofree char *message = g_strdup_printf("Choose a saved Wi-Fi profile for %s", ssid);
-    toast(actions, message);
-    return;
-  }
 
   if (!ap_has_ssid(ap)) {
     g_autofree char *context = access_point_context(ap);
