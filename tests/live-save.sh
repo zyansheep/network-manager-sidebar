@@ -5,7 +5,7 @@
 # --ui also drives the details form on a temporary profile (no window shown).
 set -euo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.."
-[[ -d build ]] || meson setup build
+[[ -d build ]] || meson setup build --buildtype=debugoptimized
 meson compile -C build test-profile-save test-profile-page
 build/test-profile-save
 build/test-profile-save --enterprise
