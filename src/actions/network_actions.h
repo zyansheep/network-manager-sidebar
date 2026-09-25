@@ -48,6 +48,15 @@ void network_sidebar_actions_edit_connection(NetworkSidebarActions *actions, NMR
 void network_sidebar_actions_open_editor(NetworkSidebarActions *actions, const char *const *args);
 gboolean network_sidebar_actions_connection_editor_available(void);
 
+void network_sidebar_actions_set_navigation(NetworkSidebarActions *actions, AdwNavigationView *view);
+NMClient *network_sidebar_actions_get_client(NetworkSidebarActions *actions);
+void network_sidebar_actions_notify(NetworkSidebarActions *actions, const char *message);
+void network_sidebar_actions_show_connection(NetworkSidebarActions *actions, NMRemoteConnection *profile, NMActiveConnection *active);
+void network_sidebar_actions_save_profile(NetworkSidebarActions *actions, NMRemoteConnection *remote,
+                                        NMConnection *draft, guint64 version,
+                                        GAsyncReadyCallback callback, gpointer user_data);
+gboolean network_sidebar_actions_save_profile_finish(GAsyncResult *result, GError **error);
+
 G_DEFINE_AUTOPTR_CLEANUP_FUNC(NetworkSidebarActions, network_sidebar_actions_unref)
 
 G_END_DECLS

@@ -35,6 +35,7 @@ struct _NetworkSidebarGuiApp {
   GtkWidget *window;
   GtkWidget *surface;
   GtkWidget *toast_overlay;
+  AdwNavigationView *navigation;
   GtkWidget *back_button;
   GtkWidget *title;
   GtkWidget *info_button;
@@ -598,6 +599,11 @@ on_key_pressed(GtkEventControllerKey *controller,
   (void) state;
 
   if (keyval == GDK_KEY_Escape) {
+    AdwNavigationPage *visible = self->navigation ? adw_navigation_view_get_visible_page(self->navigation) : NULL;
+    if (visible && adw_navigation_view_get_previous_page(self->navigation, visible)) {
+      if (adw_navigation_page_get_can_pop(visible)) adw_navigation_view_pop(self->navigation);
+      return TRUE;
+    }
     if (!go_back_to_parent_screen(self))
       hide_sidebar(self);
     return TRUE;
@@ -727,6 +733,14 @@ static void
 on_scroll_adjustment_changed(GtkAdjustment *adjustment, gpointer user_data)
 {
   (void) adjustment;
+  update_scroll_fades(user_data);
+}
+
+static void
+on_scroll_adjustment_notify(GObject *adjustment, GParamSpec *pspec, gpointer user_data)
+{
+  (void) adjustment;
+  (void) pspec;
   update_scroll_fades(user_data);
 }
 
@@ -874,7 +888,10 @@ ensure_window(NetworkSidebarGuiApp *self)
   gtk_widget_set_margin_bottom(panel_content, 12);
   gtk_widget_set_margin_start(panel_content, 12);
   gtk_widget_set_margin_end(panel_content, 12);
-  adw_toast_overlay_set_child(ADW_TOAST_OVERLAY(self->toast_overlay), panel_content);
+  self->navigation = ADW_NAVIGATION_VIEW(adw_navigation_view_new());
+  adw_navigation_view_add(self->navigation, adw_navigation_page_new(panel_content, "Networks"));
+  adw_toast_overlay_set_child(ADW_TOAST_OVERLAY(self->toast_overlay), GTK_WIDGET(self->navigation));
+  network_sidebar_actions_set_navigation(self->actions, self->navigation);
 
   top_bar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
   gtk_box_append(GTK_BOX(panel_content), top_bar);
@@ -925,9 +942,9 @@ ensure_window(NetworkSidebarGuiApp *self)
   {
     GtkAdjustment *adjustment = gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(self->scrolled));
     g_signal_connect(adjustment, "value-changed", G_CALLBACK(on_scroll_adjustment_changed), self);
-    g_signal_connect(adjustment, "notify::lower", G_CALLBACK(on_scroll_adjustment_changed), self);
-    g_signal_connect(adjustment, "notify::upper", G_CALLBACK(on_scroll_adjustment_changed), self);
-    g_signal_connect(adjustment, "notify::page-size", G_CALLBACK(on_scroll_adjustment_changed), self);
+    g_signal_connect(adjustment, "notify::lower", G_CALLBACK(on_scroll_adjustment_notify), self);
+    g_signal_connect(adjustment, "notify::upper", G_CALLBACK(on_scroll_adjustment_notify), self);
+    g_signal_connect(adjustment, "notify::page-size", G_CALLBACK(on_scroll_adjustment_notify), self);
   }
 
   click_controller = gtk_gesture_click_new();

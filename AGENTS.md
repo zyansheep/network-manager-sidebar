@@ -24,7 +24,7 @@
 
 ## Build And Packaging
 
-- There is no test-suite config; do not invent `pytest`, `ruff`, or package-manager commands.
+- `meson test -C build` runs the offline profile-model test; `tests/live-save.sh` needs a live NetworkManager (see `docs/wifi-settings.md`). Do not invent `pytest`, `ruff`, or package-manager commands.
 - Configure the local development build once with `meson setup build --prefix=/usr --libdir=lib --buildtype=debugoptimized`.
 - Focused native check after C or Meson edits: `meson compile -C build && sudo meson install -C build && nm-sidebar --help`.
 - Wayland smoke test when a graphical session exists: `(nm-sidebar --show & pid=$!; sleep 2; nm-sidebar --quit; wait "$pid")`.

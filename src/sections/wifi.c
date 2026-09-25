@@ -614,7 +614,7 @@ on_wifi_row_activated(GtkListBoxRow *row, gpointer user_data)
   (void) row;
 
   if (data->active != NULL)
-    network_sidebar_actions_deactivate(data->actions, data->active);
+    network_sidebar_actions_show_connection(data->actions, data->saved, data->active);
   else if (data->saved != NULL && data->device != NULL && data->ap != NULL)
     network_sidebar_actions_activate_saved_wifi_profile_on_device(data->actions, data->saved, data->device, data->ap);
   else if (data->device != NULL && data->ap != NULL)
@@ -624,21 +624,34 @@ on_wifi_row_activated(GtkListBoxRow *row, gpointer user_data)
 }
 
 static void
-on_wifi_edit_clicked(GtkButton *button, gpointer user_data)
+on_wifi_details_clicked(GtkButton *button, gpointer user_data)
 {
   WifiRowAction *data = user_data;
   (void) button;
-  if (data->saved != NULL)
-    network_sidebar_actions_edit_connection(data->actions, data->saved);
+  network_sidebar_actions_show_connection(data->actions, data->saved, data->active);
 }
 
 static void
-on_wifi_remove_clicked(GtkButton *button, gpointer user_data)
+on_wifi_disconnect_clicked(GtkButton *button, gpointer user_data)
 {
   WifiRowAction *data = user_data;
   (void) button;
-  if (data->saved != NULL)
-    network_sidebar_actions_confirm_delete_connection(data->actions, data->saved, "Wi-Fi");
+  if (data->active) network_sidebar_actions_deactivate(data->actions, data->active);
+}
+
+static void
+add_wifi_row_controls(GtkWidget *row, WifiRowAction *data)
+{
+  GtkWidget *button;
+  if (data->active) {
+    button = network_sidebar_flat_button("network-disconnect-symbolic", "Disconnect");
+    g_signal_connect(button, "clicked", G_CALLBACK(on_wifi_disconnect_clicked), data);
+    gtk_widget_set_tooltip_text(row, "Open network details and settings");
+  } else {
+    button = network_sidebar_flat_button("emblem-system-symbolic", "Network details and settings");
+    g_signal_connect(button, "clicked", G_CALLBACK(on_wifi_details_clicked), data);
+  }
+  adw_action_row_add_suffix(ADW_ACTION_ROW(row), button);
 }
 
 static void
@@ -698,8 +711,6 @@ add_saved_profile_row(GtkListBox *list, NMClient *client, NetworkSidebarActions 
   g_autofree char *activation_note = active == NULL ? saved_profile_activation_note(client, profile) : NULL;
   GtkWidget *row = network_sidebar_action_row(title, subtitle, "network-wireless-symbolic");
   WifiRowAction *row_action = g_new0(WifiRowAction, 1);
-  GtkWidget *edit_button;
-  GtkWidget *remove_button;
   gboolean can_activate = active != NULL || activation_note == NULL;
 
   row_action->actions = network_sidebar_actions_ref(actions);
@@ -707,16 +718,11 @@ add_saved_profile_row(GtkListBox *list, NMClient *client, NetworkSidebarActions 
   row_action->saved = g_object_ref(profile);
   network_sidebar_apply_row_state(row, row_state);
 
-  edit_button = network_sidebar_flat_button("document-edit-symbolic", "Edit");
-  g_signal_connect(edit_button, "clicked", G_CALLBACK(on_wifi_edit_clicked), row_action);
-  adw_action_row_add_suffix(ADW_ACTION_ROW(row), edit_button);
-
-  remove_button = network_sidebar_flat_button("user-trash-symbolic", "Remove");
-  g_signal_connect(remove_button, "clicked", G_CALLBACK(on_wifi_remove_clicked), row_action);
-  adw_action_row_add_suffix(ADW_ACTION_ROW(row), remove_button);
+  add_wifi_row_controls(row, row_action);
 
   if (activation_note != NULL)
     gtk_widget_set_tooltip_text(row, activation_note);
+  gtk_widget_set_focusable(row, TRUE);
   gtk_list_box_row_set_activatable(GTK_LIST_BOX_ROW(row), can_activate);
   g_signal_connect_data(row, "activated", G_CALLBACK(on_wifi_row_activated), row_action, wifi_row_action_closure_notify, 0);
   gtk_list_box_append(list, row);
@@ -837,18 +843,9 @@ add_network_row(GtkListBox *list,
   row_action->saved = saved != NULL ? g_object_ref(saved) : NULL;
   network_sidebar_apply_row_state(row, row_state);
 
-  if (row_action->saved != NULL) {
-    GtkWidget *edit_button = network_sidebar_flat_button("document-edit-symbolic", "Edit");
-    GtkWidget *remove_button;
+  if (row_action->saved || row_action->active) add_wifi_row_controls(row, row_action);
 
-    g_signal_connect(edit_button, "clicked", G_CALLBACK(on_wifi_edit_clicked), row_action);
-    adw_action_row_add_suffix(ADW_ACTION_ROW(row), edit_button);
-
-    remove_button = network_sidebar_flat_button("user-trash-symbolic", "Remove");
-    g_signal_connect(remove_button, "clicked", G_CALLBACK(on_wifi_remove_clicked), row_action);
-    adw_action_row_add_suffix(ADW_ACTION_ROW(row), remove_button);
-  }
-
+  gtk_widget_set_focusable(row, TRUE);
   gtk_list_box_row_set_activatable(GTK_LIST_BOX_ROW(row), can_activate);
   g_signal_connect_data(row, "activated", G_CALLBACK(on_wifi_row_activated), row_action, wifi_row_action_closure_notify, 0);
   gtk_list_box_append(list, row);

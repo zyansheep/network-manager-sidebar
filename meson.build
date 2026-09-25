@@ -27,6 +27,11 @@ native_args = [
   '-DNETWORK_SIDEBAR_INSTALLED_GUI_PATH="@0@"'.format(installed_gui_path),
 ]
 
+gui_args = native_args + [
+  '-DDEFAULT_WIFI_MAC_ADDRESS="@0@"'.format(get_option('default_wifi_mac')),
+  '-DUSES_IWD=@0@'.format(get_option('wifi_backend') == 'iwd' ? 1 : 0),
+]
+
 core_sources = [
   'src/core/command_socket.c',
   'src/core/ipc.c',
@@ -42,10 +47,13 @@ data_sources = [
 
 action_sources = [
   'src/actions/network_actions.c',
+  'src/actions/profile-model.c',
+  'src/actions/profile-save.c',
 ]
 
 section_sources = [
   'src/sections/connection_info.c',
+  'src/sections/connection-settings.c',
   'src/sections/helpers.c',
   'src/sections/status.c',
   'src/sections/vpn.c',
@@ -72,7 +80,7 @@ executable(
     'src/gui/styles.c',
   ] + core_sources + data_sources + action_sources + section_sources,
   dependencies: [glib_dep, gio_dep, gtk_dep, adw_dep, nm_dep, layer_shell_dep],
-  c_args: native_args,
+  c_args: gui_args,
   include_directories: include_directories('src'),
   install: true,
   install_dir: join_paths(get_option('libexecdir'), 'nm-sidebar'),
@@ -81,4 +89,34 @@ executable(
 install_data(
   'nm-sidebar.css',
   install_dir: join_paths(get_option('datadir'), 'nm-sidebar'),
+)
+
+inc = include_directories('src')
+gui_deps = [glib_dep, gio_dep, gtk_dep, adw_dep, nm_dep]
+
+test('profile-model', executable(
+  'test-profile-model',
+  ['tests/test-profile-model.c', 'src/actions/profile-model.c'],
+  dependencies: [gio_dep, nm_dep],
+  include_directories: inc,
+  build_by_default: false,
+))
+
+# Live NetworkManager checks, run by tests/live-save.sh rather than `meson test`.
+executable(
+  'test-profile-save',
+  ['tests/test-profile-save.c'] + data_sources + action_sources + section_sources,
+  dependencies: gui_deps,
+  c_args: gui_args + ['-Wno-deprecated-declarations'],
+  include_directories: inc,
+  build_by_default: false,
+)
+executable(
+  'test-profile-page',
+  ['tests/test-profile-page.c', 'src/sections/connection_info.c', 'src/sections/helpers.c',
+   'src/sections/status.c', 'src/sections/vpn.c', 'src/sections/wifi.c'] + data_sources + action_sources,
+  dependencies: gui_deps,
+  c_args: gui_args + ['-Wno-deprecated-declarations'],
+  include_directories: inc,
+  build_by_default: false,
 )

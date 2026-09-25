@@ -2,6 +2,7 @@
 
 #include "data/labels.h"
 #include "sections/helpers.h"
+#include "sections/connection-settings.h"
 
 #include <adwaita.h>
 #include <errno.h>
@@ -17,6 +18,7 @@ struct _NetworkSidebarActions {
   gint ref_count;
   NMClient *client;
   GtkWindow *parent;
+  AdwNavigationView *navigation;
   NetworkSidebarToastCallback toast;
   NetworkSidebarScheduleRefreshCallback schedule_refresh;
   gpointer user_data;
@@ -1343,7 +1345,7 @@ network_sidebar_actions_connect_wifi(NetworkSidebarActions *actions, NMDeviceWif
     g_autofree char *ssid = network_sidebar_ap_ssid_text(ap);
     g_autofree char *message = g_strdup_printf("Opening advanced Wi-Fi editor for %s", ssid);
     toast(actions, message);
-    network_sidebar_actions_open_editor(actions, editor_args);
+    network_sidebar_edit_profile(actions, actions->client, actions->navigation, NULL, ssid, TRUE);
     return;
   }
 
@@ -1634,6 +1636,23 @@ network_sidebar_actions_open_editor(NetworkSidebarActions *actions, const char *
   g_autoptr(GPtrArray) argv = g_ptr_array_new_with_free_func(g_free);
   g_auto(GStrv) env = child_process_env();
   g_autofree char *editor_path = find_program_in_path_env("nm-connection-editor", env);
+  gboolean wifi = args == NULL;
+  const char *edit_uuid = NULL;
+  for (guint i = 0; args && args[i]; i++) {
+    if (g_str_equal(args[i], "--type=802-11-wireless")) wifi = TRUE;
+    if (g_str_has_prefix(args[i], "--edit=")) edit_uuid = args[i] + strlen("--edit=");
+  }
+  if (edit_uuid) {
+    NMRemoteConnection *profile = nm_client_get_connection_by_uuid(actions->client, edit_uuid);
+    if (profile && nm_connection_get_setting_wireless(NM_CONNECTION(profile))) {
+      network_sidebar_actions_edit_connection(actions, profile);
+      return;
+    }
+  }
+  if (wifi && actions->navigation) {
+    network_sidebar_edit_profile(actions, actions->client, actions->navigation, NULL, NULL, FALSE);
+    return;
+  }
   g_autoptr(GError) error = NULL;
 
   g_ptr_array_add(argv, g_strdup(editor_path != NULL ? editor_path : "nm-connection-editor"));
@@ -1657,6 +1676,10 @@ network_sidebar_actions_open_editor(NetworkSidebarActions *actions, const char *
 void
 network_sidebar_actions_edit_connection(NetworkSidebarActions *actions, NMRemoteConnection *connection)
 {
+  if (actions->navigation && nm_connection_get_setting_wireless(NM_CONNECTION(connection))) {
+    network_sidebar_edit_profile(actions, actions->client, actions->navigation, connection, NULL, FALSE);
+    return;
+  }
   const char *uuid = nm_connection_get_uuid(NM_CONNECTION(connection));
   g_autofree char *edit_arg = NULL;
   const char *argv[2] = { NULL, NULL };
@@ -1666,4 +1689,30 @@ network_sidebar_actions_edit_connection(NetworkSidebarActions *actions, NMRemote
     argv[0] = edit_arg;
   }
   network_sidebar_actions_open_editor(actions, argv[0] != NULL ? argv : NULL);
+}
+
+void
+network_sidebar_actions_set_navigation(NetworkSidebarActions *actions, AdwNavigationView *view)
+{
+  actions->navigation = view;
+}
+
+NMClient *
+network_sidebar_actions_get_client(NetworkSidebarActions *actions)
+{
+  return actions->client;
+}
+
+void
+network_sidebar_actions_notify(NetworkSidebarActions *actions, const char *message)
+{
+  toast(actions, message);
+}
+
+void
+network_sidebar_actions_show_connection(NetworkSidebarActions *actions, NMRemoteConnection *profile, NMActiveConnection *active)
+{
+  if (!profile && active) profile = nm_active_connection_get_connection(active);
+  if (actions->navigation)
+    network_sidebar_show_profile(actions, actions->client, actions->navigation, profile, active);
 }

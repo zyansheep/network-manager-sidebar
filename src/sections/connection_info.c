@@ -3,16 +3,40 @@
 #include "data/labels.h"
 #include "sections/helpers.h"
 
+GtkWidget *
+network_sidebar_compact_info_row(const char *title, const char *value, GtkWidget **value_label)
+{
+  GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+  GtkWidget *label = gtk_label_new(title);
+  GtkWidget *text = gtk_label_new(value ? value : "");
+  gtk_widget_add_css_class(row, "connection-info-row");
+  gtk_widget_add_css_class(label, "dim-label");
+  gtk_label_set_xalign(GTK_LABEL(label), 0);
+  gtk_label_set_wrap(GTK_LABEL(label), TRUE);
+  gtk_label_set_max_width_chars(GTK_LABEL(label), 14);
+  gtk_widget_set_size_request(label, 90, -1);
+  gtk_widget_set_valign(label, GTK_ALIGN_START);
+  gtk_label_set_xalign(GTK_LABEL(text), 0);
+  gtk_label_set_selectable(GTK_LABEL(text), TRUE);
+  gtk_label_set_wrap(GTK_LABEL(text), TRUE);
+  gtk_label_set_wrap_mode(GTK_LABEL(text), PANGO_WRAP_WORD_CHAR);
+  gtk_widget_set_hexpand(text, TRUE);
+  gtk_box_append(GTK_BOX(row), label);
+  gtk_box_append(GTK_BOX(row), text);
+  if (value_label) *value_label = text;
+  return row;
+}
+
 static void
 add_info_row(AdwPreferencesGroup *group, const char *label, const char *value)
 {
-  GtkWidget *row;
-
   if (value == NULL || *value == '\0')
     return;
-  row = network_sidebar_action_row(label, value, NULL);
-  adw_action_row_set_subtitle_selectable(ADW_ACTION_ROW(row), TRUE);
-  adw_action_row_set_subtitle_lines(ADW_ACTION_ROW(row), 0);
+  GtkWidget *row = gtk_list_box_row_new();
+  gtk_widget_add_css_class(row, "connection-info-wrapper");
+  gtk_list_box_row_set_activatable(GTK_LIST_BOX_ROW(row), FALSE);
+  gtk_list_box_row_set_selectable(GTK_LIST_BOX_ROW(row), FALSE);
+  gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), network_sidebar_compact_info_row(label, value, NULL));
   adw_preferences_group_add(group, row);
 }
 
@@ -191,7 +215,7 @@ add_device_rows(AdwPreferencesGroup *group, NMActiveConnection *active, NMDevice
   add_info_row(group, "Device state", state);
   if (ip_iface != NULL && *ip_iface != '\0' && g_strcmp0(ip_iface, iface) != 0)
     add_info_row(group, "IP interface", ip_iface);
-  add_info_row(group, "Hardware address", nm_device_get_hw_address(device));
+  add_info_row(group, "MAC address", nm_device_get_hw_address(device));
   add_info_row(group, "Driver", nm_device_get_driver(device));
 
   if (NM_IS_DEVICE_ETHERNET(device)) {
@@ -234,12 +258,10 @@ add_device_rows(AdwPreferencesGroup *group, NMActiveConnection *active, NMDevice
 static void
 add_connection_rows(AdwPreferencesGroup *group, NMActiveConnection *active, NMDevice *device, gboolean include_active_ip_config)
 {
-  g_autofree char *connection = network_sidebar_active_connection_name(active, "Unknown");
   g_autofree char *type = network_sidebar_connection_type_label(nm_active_connection_get_connection_type(active));
   g_autofree char *state = network_sidebar_active_state_label(nm_active_connection_get_state(active));
   g_autoptr(GString) default_routes = g_string_new(NULL);
 
-  add_info_row(group, "Connection", connection);
   add_info_row(group, "Type", type);
   add_info_row(group, "State", state);
   if (nm_active_connection_get_vpn(active) && NM_IS_VPN_CONNECTION(active)) {
@@ -263,13 +285,14 @@ add_connection_rows(AdwPreferencesGroup *group, NMActiveConnection *active, NMDe
 }
 
 void
-network_sidebar_add_connection_info_content(GtkBox *content, NMClient *client)
+network_sidebar_add_active_connection_info_content(GtkBox *content, NMClient *client, NMActiveConnection *selected)
 {
   const GPtrArray *active_connections = nm_client_get_active_connections(client);
   gboolean added = FALSE;
 
   for (guint i = 0; active_connections != NULL && i < active_connections->len; i++) {
     NMActiveConnection *active = g_ptr_array_index((GPtrArray *) active_connections, i);
+    if (selected && active != selected) continue;
     const GPtrArray *raw_devices = nm_active_connection_get_devices(active);
     g_autoptr(GPtrArray) devices = g_ptr_array_new();
     gboolean devices_available = raw_devices != NULL;
@@ -350,4 +373,10 @@ network_sidebar_add_connection_info_content(GtkBox *content, NMClient *client)
     network_sidebar_add_notice(ADW_PREFERENCES_GROUP(group), "No connection details available", "NetworkManager has no connection details to show", "dialog-information-symbolic");
     gtk_box_append(content, group);
   }
+}
+
+void
+network_sidebar_add_connection_info_content(GtkBox *content, NMClient *client)
+{
+  network_sidebar_add_active_connection_info_content(content, client, NULL);
 }

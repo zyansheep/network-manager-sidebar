@@ -1,0 +1,4 @@
+option('default_wifi_mac', type: 'string', value: 'stable-ssid',
+  description: 'Global NetworkManager wifi.cloned-mac-address policy shown as the inherited MAC default')
+option('wifi_backend', type: 'combo', choices: ['iwd', 'wpa_supplicant'], value: 'iwd',
+  description: 'NetworkManager Wi-Fi backend; iwd supports fewer MAC policies')
