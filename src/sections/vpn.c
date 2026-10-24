@@ -199,13 +199,12 @@ void network_sidebar_vpn_section_update(GtkWidget *section, NMClient *client) {
 
   if (snapshot->plugin_status == NETWORK_SIDEBAR_VPN_PLUGIN_UNKNOWN)
     vpn_section_add_notice(data, group, "VPN plugin status unavailable",
-                           "Could not verify installed NetworkManager VPN "
-                           "plugins; VPN actions remain available");
+                           "Could not check installed VPN plugins; "
+                           "VPN actions remain available");
   else if (snapshot->plugin_status == NETWORK_SIDEBAR_VPN_PLUGIN_MISSING)
     vpn_section_add_notice(
         data, group, "No VPN plugins installed",
-        "Install a NetworkManager VPN plugin for plugin-based VPN profiles; "
-        "WireGuard remains available");
+        "Install a NetworkManager VPN plugin; WireGuard remains available");
 
   for (guint i = 0; i < snapshot->profiles->len; i++) {
     const NetworkSidebarVpnProfile *profile =

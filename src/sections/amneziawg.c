@@ -344,13 +344,11 @@ void network_sidebar_amneziawg_section_update(
   if (inventory_loading && entry_count == 0)
     network_sidebar_add_notice(
         ADW_PREFERENCES_GROUP(group), "Refreshing profiles",
-        "Reading saved configurations without exposing their contents",
-        "content-loading-symbolic");
+        "Reading saved configurations", "content-loading-symbolic");
   else if (snapshot->runtime_loading && entry_count == 0)
     network_sidebar_add_notice(
         ADW_PREFERENCES_GROUP(group), "Checking runtime state",
-        "Verifying tunnel interfaces and runtime records",
-        "content-loading-symbolic");
+        "Checking tunnel status", "content-loading-symbolic");
   else if (!inventory_loading && profiles_warning != NULL)
     network_sidebar_add_notice(ADW_PREFERENCES_GROUP(group),
                                "Profile list incomplete", profiles_warning,
@@ -399,7 +397,7 @@ void network_sidebar_amneziawg_section_update(
     else if (recovery)
       subtitle = "Recovery required; select to clean up";
     else if (manual)
-      subtitle = "Manual cleanup required; runtime state retained";
+      subtitle = "Manual cleanup required";
     else if (conflict)
       subtitle = "Externally managed interface conflict";
     else if (checking)
@@ -448,7 +446,7 @@ void network_sidebar_amneziawg_section_update(
         tooltip = "Retry firewall inspection; remaining rules require "
                   "administrator cleanup";
       else if (recovery)
-        tooltip = "A previous operation was interrupted; select to retry owned "
+        tooltip = "A previous operation was interrupted; select to retry "
                   "cleanup";
     }
     gtk_widget_set_tooltip_text(row, loading ? NULL : tooltip);

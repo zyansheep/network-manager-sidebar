@@ -1016,13 +1016,12 @@ void network_sidebar_add_wifi_group(GtkBox *content, NMClient *client,
         network_sidebar_actions_get_wifi_scan_error(actions);
 
     if (network_sidebar_actions_get_wifi_scan_in_progress(actions))
-      network_sidebar_add_notice(
-          ADW_PREFERENCES_GROUP(group), "Scanning for networks...",
-          "Updating nearby Wi-Fi access points", "view-refresh-symbolic");
+      network_sidebar_add_notice(ADW_PREFERENCES_GROUP(group),
+                                 "Scanning for networks...", NULL,
+                                 "view-refresh-symbolic");
     else if (scan_error == NULL)
       network_sidebar_add_notice(ADW_PREFERENCES_GROUP(group),
-                                 "No networks found",
-                                 "No access points are currently visible",
+                                 "No networks found", NULL,
                                  "network-wireless-signal-none-symbolic");
     if (scan_error != NULL)
       network_sidebar_add_notice(ADW_PREFERENCES_GROUP(group),

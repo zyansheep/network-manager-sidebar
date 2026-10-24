@@ -31,11 +31,10 @@ const char *network_sidebar_awg_message_for_action_blocked(
   case NETWORK_SIDEBAR_AWG_ACTION_BLOCKED_RUNTIME_UNKNOWN:
     return "Wait for the AmneziaWG runtime state to refresh";
   case NETWORK_SIDEBAR_AWG_ACTION_BLOCKED_CONFLICT:
-    return "This interface is not owned by the current nm-sidebar runtime "
-           "marker";
+    return "This interface is managed outside nm-sidebar";
   case NETWORK_SIDEBAR_AWG_ACTION_BLOCKED_MANUAL_CLEANUP:
-    return "Automatic cleanup was not confirmed; inspect the retained root "
-           "runtime journal";
+    return "Automatic cleanup could not be confirmed; manual inspection is "
+           "required";
   case NETWORK_SIDEBAR_AWG_ACTION_BLOCKED_ALREADY_IN_STATE:
   case NETWORK_SIDEBAR_AWG_ACTION_BLOCKED_NONE:
     return NULL;
@@ -127,8 +126,7 @@ messages_helper_failure_message(NetworkSidebarAwgBackendOperation operation,
     return g_strdup("Tunnel DNS requires systemd-resolved or a trusted "
                     "resolvconf installation");
   case NETWORK_SIDEBAR_AMNEZIAWG_HELPER_DNS_APPLY_FAILED:
-    return g_strdup(
-        "Could not apply tunnel DNS through the active resolver backend");
+    return g_strdup("Could not configure tunnel DNS");
   case NETWORK_SIDEBAR_AMNEZIAWG_HELPER_DNS_REVERT_FAILED:
     return g_strdup(
         "Could not remove tunnel DNS; check the refreshed tunnel state");
@@ -136,8 +134,7 @@ messages_helper_failure_message(NetworkSidebarAwgBackendOperation operation,
     return g_strdup(
         "Tunnel DNS could not be restored while rolling back the operation");
   case NETWORK_SIDEBAR_AMNEZIAWG_HELPER_INVENTORY_PARTIAL:
-    return g_strdup(
-        "Some AmneziaWG profile names could not be reported safely");
+    return g_strdup("Some AmneziaWG profiles could not be listed");
   case NETWORK_SIDEBAR_AMNEZIAWG_HELPER_TIMED_OUT:
     if (operation == NETWORK_SIDEBAR_AWG_BACKEND_LIST_PROFILES)
       return g_strdup("The AmneziaWG profile refresh timed out");
@@ -308,8 +305,7 @@ char *network_sidebar_awg_message_for_profile_warning(
     return NULL;
   switch (warning->kind) {
   case NETWORK_SIDEBAR_AWG_PROFILE_WARNING_PARTIAL:
-    message =
-        g_strdup("Some configuration filenames could not be reported safely");
+    message = g_strdup("Some configurations could not be listed");
     break;
   case NETWORK_SIDEBAR_AWG_PROFILE_WARNING_TIMED_OUT:
     message = g_strdup("The AmneziaWG profile refresh timed out");

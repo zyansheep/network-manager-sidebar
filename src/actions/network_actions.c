@@ -767,8 +767,8 @@ static gboolean verify_wifi_state_cb(gpointer user_data) {
       nm_client_wireless_get_enabled(verify->actions->client);
 
   if (verify->enabled && !hardware_enabled)
-    toast(verify->actions, "Could not enable Wi-Fi: wireless hardware is "
-                           "disabled or blocked by rfkill");
+    toast(verify->actions, "Could not enable Wi-Fi: check airplane mode or the "
+                           "wireless hardware switch");
   else if (wireless_enabled != verify->enabled) {
     g_autofree char *message =
         g_strdup_printf("NetworkManager rejected the request to %s Wi-Fi",

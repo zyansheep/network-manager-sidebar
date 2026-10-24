@@ -379,10 +379,9 @@ void network_sidebar_add_connection_info_content(GtkBox *content,
 
   if (!added) {
     GtkWidget *group = network_sidebar_section_group("Connection Information");
-    network_sidebar_add_notice(
-        ADW_PREFERENCES_GROUP(group), "No connection details available",
-        "NetworkManager has no connection details to show",
-        "dialog-information-symbolic");
+    network_sidebar_add_notice(ADW_PREFERENCES_GROUP(group),
+                               "No connection details available", NULL,
+                               "dialog-information-symbolic");
     gtk_box_append(content, group);
   }
 }
