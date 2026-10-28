@@ -1096,6 +1096,13 @@ show_sidebar(NetworkSidebarGuiApp *self)
 static void
 hide_sidebar(NetworkSidebarGuiApp *self)
 {
+  network_sidebar_wifi_search_reset();
+  /* Reopen at the top, where the connection status is. */
+  if (self->scrolled != NULL) {
+    GtkAdjustment *adjustment = scroll_adjustment(self);
+    cancel_scroll_restore(self);
+    gtk_adjustment_set_value(adjustment, gtk_adjustment_get_lower(adjustment));
+  }
   if (self->window != NULL)
     gtk_widget_set_visible(self->window, FALSE);
 }
@@ -1180,6 +1187,8 @@ static void
 refresh_content(NetworkSidebarGuiApp *self, gboolean preserve_scroll)
 {
   double scroll_value;
+  gboolean search_focused;
+  GtkWidget *networks;
 
   if (self->content == NULL || self->client == NULL || self->actions == NULL)
     return;
@@ -1188,6 +1197,7 @@ refresh_content(NetworkSidebarGuiApp *self, gboolean preserve_scroll)
   sync_refresh_signals(self);
   self->refreshing = TRUE;
   gtk_switch_set_active(GTK_SWITCH(self->networking_switch), nm_client_networking_get_enabled(self->client));
+  search_focused = network_sidebar_wifi_search_has_focus();
   network_sidebar_clear_box(GTK_BOX(self->content));
 
   if (self->showing_connection_information) {
@@ -1202,10 +1212,14 @@ refresh_content(NetworkSidebarGuiApp *self, gboolean preserve_scroll)
     gtk_widget_set_visible(self->info_button, TRUE);
     gtk_widget_set_visible(self->networking_switch, TRUE);
     network_sidebar_add_status_group(GTK_BOX(self->content), self->client, self->actions);
+    /* Status first (connected Wi-Fi with its traffic), then VPN, then the
+     * networks to pick from. */
+    networks = network_sidebar_add_wifi_group(GTK_BOX(self->content), self->client, self->actions, self->traffic);
     network_sidebar_add_vpn_group(GTK_BOX(self->content), self->client, self->actions);
-    network_sidebar_traffic_attach(self->traffic, GTK_BOX(self->content));
-    network_sidebar_add_wifi_group(GTK_BOX(self->content), self->client, self->actions);
+    if (networks != NULL)
+      gtk_box_append(GTK_BOX(self->content), networks);
   }
+  network_sidebar_wifi_search_restore_focus(search_focused);
   self->refreshing = FALSE;
   schedule_scroll_restore(self, scroll_value);
   update_scroll_fades(self);

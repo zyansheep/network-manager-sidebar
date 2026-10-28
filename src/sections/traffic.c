@@ -1,7 +1,5 @@
 #include "sections/traffic.h"
 
-#include "sections/helpers.h"
-
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -29,12 +27,13 @@ typedef struct {
 
 struct _NetworkSidebarTraffic {
   NMClient *client;
-  GtkWidget *group;
-  GtkWidget *rate_label;
+  /* Rows owned here and re-appended to the connected-network card on every
+   * content rebuild, so the usage expander keeps its state. */
+  GtkWidget *live_row;
+  GtkWidget *down_label;
+  GtkWidget *up_label;
   GtkWidget *live_area;
-  GtkWidget *usage_box;
-  GtkWidget *today_label;
-  GtkWidget *month_label;
+  GtkWidget *usage_row;
   GtkWidget *days_area;
   char *iface;
   guint64 last_rx;
@@ -78,12 +77,25 @@ series_dot(int series)
   return g_strdup_printf("<span foreground=\"%s\">●</span>", hex);
 }
 
+/* Three significant digits (9.13 MB, 37.2 kB, 500 kB) keep the width steady. */
 static char *
 format_bytes(double bytes)
 {
+  static const char *units[] = { "kB", "MB", "GB", "TB" };
+  guint unit = 0;
+
   if (bytes < 1000)
     return g_strdup_printf("%.0f B", bytes);
-  return g_format_size((guint64) bytes);
+  bytes /= 1000;
+  while (bytes >= 999.5 && unit + 1 < G_N_ELEMENTS(units)) {
+    bytes /= 1000;
+    unit++;
+  }
+  if (bytes < 9.995)
+    return g_strdup_printf("%.2f %s", bytes, units[unit]);
+  if (bytes < 99.95)
+    return g_strdup_printf("%.1f %s", bytes, units[unit]);
+  return g_strdup_printf("%.0f %s", bytes, units[unit]);
 }
 
 static char *
@@ -130,7 +142,8 @@ update_rate_label(NetworkSidebarTraffic *self)
   g_autofree char *up_dot = series_dot(1);
   g_autofree char *down = NULL;
   g_autofree char *up = NULL;
-  g_autofree char *markup = NULL;
+  g_autofree char *down_markup = NULL;
+  g_autofree char *up_markup = NULL;
   double rx = 0, tx = 0;
 
   if (self->count > 0) {
@@ -140,8 +153,10 @@ update_rate_label(NetworkSidebarTraffic *self)
   }
   down = format_rate(rx);
   up = format_rate(tx);
-  markup = g_strdup_printf("%s ↓ %s   %s ↑ %s", down_dot, down, up_dot, up);
-  gtk_label_set_markup(GTK_LABEL(self->rate_label), markup);
+  down_markup = g_strdup_printf("%s ↓ %s", down_dot, down);
+  up_markup = g_strdup_printf("%s ↑ %s", up_dot, up);
+  gtk_label_set_markup(GTK_LABEL(self->down_label), down_markup);
+  gtk_label_set_markup(GTK_LABEL(self->up_label), up_markup);
 }
 
 static void
@@ -270,7 +285,7 @@ update_usage(NetworkSidebarTraffic *self)
   g_autofree char *today = NULL;
   g_autofree char *month = NULL;
 
-  gtk_widget_set_visible(self->usage_box, self->n_days > 0);
+  gtk_widget_set_visible(self->usage_row, self->n_days > 0);
   if (self->n_days == 0)
     return;
   for (guint i = 0; i < self->n_days; i++) {
@@ -288,10 +303,10 @@ update_usage(NetworkSidebarTraffic *self)
   today_up = format_bytes(today_tx);
   month_down = format_bytes(month_rx);
   month_up = format_bytes(month_tx);
-  today = g_strdup_printf("Today  ↓ %s  ↑ %s", today_down, today_up);
-  month = g_strdup_printf("%s  ↓ %s  ↑ %s", month_name, month_down, month_up);
-  gtk_label_set_label(GTK_LABEL(self->today_label), today);
-  gtk_label_set_label(GTK_LABEL(self->month_label), month);
+  today = g_strdup_printf("Today   ↓ %s   ↑ %s", today_down, today_up);
+  month = g_strdup_printf("%s   ↓ %s   ↑ %s", month_name, month_down, month_up);
+  adw_preferences_row_set_title(ADW_PREFERENCES_ROW(self->usage_row), today);
+  adw_expander_row_set_subtitle(ADW_EXPANDER_ROW(self->usage_row), month);
   gtk_widget_queue_draw(self->days_area);
 }
 
@@ -670,61 +685,66 @@ on_dark_changed(GObject *object, GParamSpec *pspec, gpointer user_data)
   gtk_widget_queue_draw(self->days_area);
 }
 
+static GtkWidget *
+static_row(GtkWidget *child)
+{
+  GtkWidget *row = gtk_list_box_row_new();
+  gtk_list_box_row_set_activatable(GTK_LIST_BOX_ROW(row), FALSE);
+  gtk_list_box_row_set_selectable(GTK_LIST_BOX_ROW(row), FALSE);
+  gtk_list_box_row_set_child(GTK_LIST_BOX_ROW(row), child);
+  return row;
+}
+
+static GtkWidget *
+rate_label(void)
+{
+  GtkWidget *label = gtk_label_new(NULL);
+  gtk_widget_add_css_class(label, "numeric");
+  gtk_label_set_xalign(GTK_LABEL(label), 0);
+  /* Room for "● ↓ 999 kB/s" so the pair doesn't shift as values change. */
+  gtk_label_set_width_chars(GTK_LABEL(label), 13);
+  return label;
+}
+
 NetworkSidebarTraffic *
 network_sidebar_traffic_new(NMClient *client)
 {
   NetworkSidebarTraffic *self = g_new0(NetworkSidebarTraffic, 1);
-  GtkWidget *card, *box, *captions, *usage_text;
+  GtkWidget *box, *rates, *captions;
 
   self->client = g_object_ref(client);
-  self->group = network_sidebar_section_group("Traffic");
-  g_object_ref_sink(self->group);
 
-  self->rate_label = gtk_label_new(NULL);
-  gtk_widget_add_css_class(self->rate_label, "numeric");
-  gtk_widget_set_valign(self->rate_label, GTK_ALIGN_CENTER);
-  adw_preferences_group_set_header_suffix(ADW_PREFERENCES_GROUP(self->group), self->rate_label);
-
-  card = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-  gtk_widget_add_css_class(card, "card");
-  gtk_widget_add_css_class(card, "traffic-card");
   box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
-  gtk_box_append(GTK_BOX(card), box);
-
-  self->live_area = chart(64, draw_live, G_CALLBACK(live_tooltip), self);
+  gtk_widget_add_css_class(box, "traffic-live");
+  rates = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+  self->down_label = rate_label();
+  self->up_label = rate_label();
+  gtk_box_append(GTK_BOX(rates), self->down_label);
+  gtk_box_append(GTK_BOX(rates), self->up_label);
+  gtk_box_append(GTK_BOX(rates), caption("last 5 min", 1));
+  gtk_box_append(GTK_BOX(box), rates);
+  self->live_area = chart(40, draw_live, G_CALLBACK(live_tooltip), self);
   gtk_box_append(GTK_BOX(box), self->live_area);
-  captions = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
-  gtk_box_append(GTK_BOX(captions), caption("5 min ago", 0));
-  gtk_box_append(GTK_BOX(captions), caption("now", 1));
-  gtk_box_append(GTK_BOX(box), captions);
+  self->live_row = g_object_ref_sink(static_row(box));
 
-  self->usage_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
-  gtk_widget_add_css_class(self->usage_box, "traffic-usage");
-  usage_text = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
-  self->today_label = gtk_label_new(NULL);
-  self->month_label = gtk_label_new(NULL);
-  gtk_widget_add_css_class(self->today_label, "numeric");
-  gtk_widget_add_css_class(self->month_label, "numeric");
-  gtk_label_set_xalign(GTK_LABEL(self->today_label), 0);
-  gtk_label_set_xalign(GTK_LABEL(self->month_label), 1);
-  gtk_widget_set_hexpand(self->today_label, TRUE);
-  gtk_widget_set_hexpand(self->month_label, TRUE);
-  gtk_box_append(GTK_BOX(usage_text), self->today_label);
-  gtk_box_append(GTK_BOX(usage_text), self->month_label);
-  gtk_box_append(GTK_BOX(self->usage_box), usage_text);
+  /* Daily usage is rarely needed at a glance: a collapsed row whose title
+   * already carries today's and this month's totals. */
+  self->usage_row = g_object_ref_sink(adw_expander_row_new());
+  gtk_widget_add_css_class(self->usage_row, "traffic-usage");
+  adw_expander_row_add_prefix(ADW_EXPANDER_ROW(self->usage_row), gtk_image_new_from_icon_name("document-open-recent-symbolic"));
+  box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
+  gtk_widget_add_css_class(box, "traffic-days");
   self->days_area = chart(48, draw_days, G_CALLBACK(days_tooltip), self);
-  gtk_box_append(GTK_BOX(self->usage_box), self->days_area);
+  gtk_box_append(GTK_BOX(box), self->days_area);
   captions = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
   gtk_box_append(GTK_BOX(captions), caption("30 days ago", 0));
   gtk_box_append(GTK_BOX(captions), caption("today", 1));
-  gtk_box_append(GTK_BOX(self->usage_box), captions);
-  gtk_widget_set_visible(self->usage_box, FALSE);
-  gtk_box_append(GTK_BOX(box), self->usage_box);
+  gtk_box_append(GTK_BOX(box), captions);
+  adw_expander_row_add_row(ADW_EXPANDER_ROW(self->usage_row), static_row(box));
+  gtk_widget_set_visible(self->usage_row, FALSE);
 
-  adw_preferences_group_add(ADW_PREFERENCES_GROUP(self->group), card);
   update_rate_label(self);
-  g_signal_connect_object(adw_style_manager_get_default(), "notify::dark", G_CALLBACK(on_dark_changed),
-                          self->group, G_CONNECT_SWAPPED);
+  g_signal_connect(adw_style_manager_get_default(), "notify::dark", G_CALLBACK(on_dark_changed), self);
 
   take_sample(self);
   restart_sampling(self);
@@ -736,25 +756,34 @@ network_sidebar_traffic_free(NetworkSidebarTraffic *self)
 {
   if (self == NULL)
     return;
+  g_signal_handlers_disconnect_by_data(adw_style_manager_get_default(), self);
   g_clear_handle_id(&self->sample_source, g_source_remove);
   if (self->vnstat_cancel != NULL)
     g_cancellable_cancel(self->vnstat_cancel);
   g_clear_object(&self->vnstat_cancel);
-  g_clear_object(&self->group);
+  g_clear_object(&self->live_row);
+  g_clear_object(&self->usage_row);
   g_clear_object(&self->client);
   g_free(self->iface);
   g_free(self);
 }
 
-void
-network_sidebar_traffic_attach(NetworkSidebarTraffic *self, GtkBox *content)
+static void
+move_row(GtkWidget *row, GtkListBox *list)
 {
-  if (self == NULL || wifi_iface(self->client) == NULL)
+  GtkWidget *parent = gtk_widget_get_parent(row);
+  if (GTK_IS_LIST_BOX(parent))
+    gtk_list_box_remove(GTK_LIST_BOX(parent), row);
+  gtk_list_box_append(list, row);
+}
+
+void
+network_sidebar_traffic_add_rows(NetworkSidebarTraffic *self, GtkListBox *list)
+{
+  if (self == NULL)
     return;
-  GtkWidget *parent = gtk_widget_get_parent(self->group);
-  if (parent != NULL && GTK_IS_BOX(parent))
-    gtk_box_remove(GTK_BOX(parent), self->group);
-  gtk_box_append(content, self->group);
+  move_row(self->live_row, list);
+  move_row(self->usage_row, list);
 }
 
 void

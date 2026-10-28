@@ -12,8 +12,9 @@ typedef struct _NetworkSidebarTraffic NetworkSidebarTraffic;
  * every 1 s while active) so the live graph is already filled when shown. */
 NetworkSidebarTraffic *network_sidebar_traffic_new(NMClient *client);
 void network_sidebar_traffic_free(NetworkSidebarTraffic *traffic);
-/* The group survives content rebuilds; append it again after each clear. */
-void network_sidebar_traffic_attach(NetworkSidebarTraffic *traffic, GtkBox *content);
+/* Appends the live graph and the usage rows to the connected-network card.
+ * The rows survive content rebuilds; call again after each clear. */
+void network_sidebar_traffic_add_rows(NetworkSidebarTraffic *traffic, GtkListBox *list);
 void network_sidebar_traffic_set_active(NetworkSidebarTraffic *traffic, gboolean active);
 
 G_END_DECLS

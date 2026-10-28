@@ -25,7 +25,6 @@ struct _NetworkSidebarActions {
   gboolean wifi_scan_in_progress;
   guint wifi_scan_pending_requests;
   guint wifi_scan_settle_source;
-  AdwToast *wifi_scan_toast;
   char *wifi_scan_error;
   gint64 last_scan_us;
   GHashTable *activation_watches;
@@ -63,7 +62,6 @@ typedef struct {
 static AdwToast *toast_with_handle(NetworkSidebarActions *actions, const char *message);
 static void toast(NetworkSidebarActions *actions, const char *message);
 static void schedule_refresh(NetworkSidebarActions *actions, guint delay_ms);
-static void dismiss_wifi_scan_toast(NetworkSidebarActions *actions);
 static void activation_watch_free(ActivationWatch *watch);
 static void prompt_wifi_password(NetworkSidebarActions *actions,
                                  NMDeviceWifi *device,
@@ -102,7 +100,6 @@ network_sidebar_actions_unref(NetworkSidebarActions *actions)
     return;
   if (actions->wifi_scan_settle_source != 0)
     g_source_remove(actions->wifi_scan_settle_source);
-  dismiss_wifi_scan_toast(actions);
   g_free(actions->wifi_scan_error);
   g_clear_pointer(&actions->activation_watches, g_hash_table_unref);
   g_clear_object(&actions->client);
@@ -641,8 +638,6 @@ activation_watch_poll(ActivationWatch *watch)
   NMActiveConnectionState state = nm_active_connection_get_state(watch->active);
 
   if (state == NM_ACTIVE_CONNECTION_STATE_ACTIVATED) {
-    g_autofree char *message = g_strdup_printf(watch->is_vpn ? "VPN connected: %s" : "Wi-Fi connected: %s", watch->name);
-    toast(watch->actions, message);
     schedule_refresh(watch->actions, 500);
     return FALSE;
   }
@@ -672,8 +667,6 @@ activation_watch_poll(ActivationWatch *watch)
   }
 
   if (watch->checks_remaining == 0) {
-    g_autofree char *message = g_strdup_printf(watch->is_vpn ? "VPN is still connecting: %s" : "Wi-Fi is still connecting: %s", watch->name);
-    toast(watch->actions, message);
     schedule_refresh(watch->actions, 500);
     return FALSE;
   }
@@ -745,16 +738,6 @@ toast(NetworkSidebarActions *actions, const char *message)
 }
 
 static void
-dismiss_wifi_scan_toast(NetworkSidebarActions *actions)
-{
-  if (actions->wifi_scan_toast == NULL)
-    return;
-
-  adw_toast_dismiss(actions->wifi_scan_toast);
-  g_clear_object(&actions->wifi_scan_toast);
-}
-
-static void
 schedule_refresh(NetworkSidebarActions *actions, guint delay_ms)
 {
   if (actions->schedule_refresh != NULL)
@@ -799,7 +782,6 @@ network_sidebar_actions_set_networking_enabled(NetworkSidebarActions *actions, g
     return;
   }
 
-  toast(actions, enabled ? "Networking enabled" : "Networking disabled");
   schedule_refresh(actions, 500);
 }
 
@@ -833,7 +815,6 @@ network_sidebar_actions_set_wireless_enabled(NetworkSidebarActions *actions, gbo
   WifiVerify *verify;
 
   nm_client_wireless_set_enabled(actions->client, enabled);
-  toast(actions, enabled ? "Turning Wi-Fi on..." : "Turning Wi-Fi off...");
   schedule_refresh(actions, 500);
 
   verify = g_new0(WifiVerify, 1);
@@ -849,7 +830,6 @@ finish_scan_settle_cb(gpointer user_data)
   actions->wifi_scan_settle_source = 0;
   actions->wifi_scan_in_progress = FALSE;
   g_clear_pointer(&actions->wifi_scan_error, g_free);
-  dismiss_wifi_scan_toast(actions);
   schedule_refresh(actions, 1);
   network_sidebar_actions_unref(actions);
   return G_SOURCE_REMOVE;
@@ -868,7 +848,6 @@ finish_scan_request_cb(GObject *source, GAsyncResult *result, gpointer user_data
                                                 error != NULL ? error->message : "unknown error");
     g_free(actions->wifi_scan_error);
     actions->wifi_scan_error = g_strdup(message);
-    dismiss_wifi_scan_toast(actions);
     toast(actions, message);
   }
 
@@ -911,8 +890,6 @@ network_sidebar_actions_request_scan(NetworkSidebarActions *actions)
     g_source_remove(actions->wifi_scan_settle_source);
     actions->wifi_scan_settle_source = 0;
   }
-  dismiss_wifi_scan_toast(actions);
-  actions->wifi_scan_toast = toast_with_handle(actions, "Scanning for Wi-Fi networks...");
   schedule_refresh(actions, 1);
 
   for (guint i = 0; devices != NULL && i < devices->len; i++) {
@@ -923,6 +900,14 @@ network_sidebar_actions_request_scan(NetworkSidebarActions *actions)
     actions->wifi_scan_pending_requests++;
     nm_device_wifi_request_scan_async(NM_DEVICE_WIFI(device), NULL, finish_scan_request_cb, network_sidebar_actions_ref(actions));
   }
+}
+
+/* An explicit request from the scan button skips the background throttle. */
+void
+network_sidebar_actions_rescan(NetworkSidebarActions *actions)
+{
+  actions->last_scan_us = 0;
+  network_sidebar_actions_request_scan(actions);
 }
 
 static void
@@ -950,8 +935,6 @@ activate_finish_cb(GObject *source, GAsyncResult *result, gpointer user_data)
       cleanup_temporary_wifi_profile(async->actions, async->temp_uuid, async->name);
     }
   } else {
-    g_autofree char *message = g_strdup_printf("Started connecting %s", async->name);
-    toast(async->actions, message);
     start_activation_watch(async, active);
   }
   schedule_refresh(async->actions, 1000);
@@ -965,9 +948,6 @@ network_sidebar_actions_activate_connection(NetworkSidebarActions *actions,
                                             const char *specific_object)
 {
   g_autofree char *name = network_sidebar_connection_name(connection, "connection");
-  g_autofree char *message = g_strdup_printf("Connecting %s...", name);
-
-  toast(actions, message);
   nm_client_activate_connection_async(actions->client,
                                       connection,
                                       device,
@@ -1002,8 +982,6 @@ add_and_activate_wifi_finish_cb(GObject *source, GAsyncResult *result, gpointer 
       cleanup_temporary_wifi_profile(async->actions, async->temp_uuid, async->name);
     }
   } else {
-    g_autofree char *message = g_strdup_printf("Started connecting %s", async->name);
-    toast(async->actions, message);
     start_activation_watch(async, active);
   }
   schedule_refresh(async->actions, 1200);
@@ -1120,10 +1098,6 @@ network_sidebar_actions_activate_saved_wifi_profile_on_device(NetworkSidebarActi
   async->wifi_device = g_object_ref(device);
   async->wifi_ap = g_object_ref(ap);
   async->saved_wifi = g_object_ref(connection);
-  {
-    g_autofree char *message = g_strdup_printf("Connecting %s...", name);
-    toast(actions, message);
-  }
   /* Profile constraints still apply while NetworkManager chooses the best matching BSSID. */
   nm_client_activate_connection_async(actions->client,
                                       NM_CONNECTION(connection),
@@ -1170,10 +1144,6 @@ network_sidebar_actions_activate_saved_wifi_profile(NetworkSidebarActions *actio
   async->retry_wifi_auth = TRUE;
   async->wifi_device = g_object_ref(device);
   async->saved_wifi = g_object_ref(connection);
-  {
-    g_autofree char *message = g_strdup_printf("Connecting %s...", name);
-    toast(actions, message);
-  }
   nm_client_activate_connection_async(actions->client,
                                       NM_CONNECTION(connection),
                                       NM_DEVICE(device),
@@ -1394,10 +1364,6 @@ network_sidebar_actions_activate_vpn_connection(NetworkSidebarActions *actions, 
 
   async = async_action_new(actions, name);
   async->is_vpn = TRUE;
-  {
-    g_autofree char *message = g_strdup_printf("Connecting %s...", name);
-    toast(actions, message);
-  }
   nm_client_activate_connection_async(actions->client,
                                       NM_CONNECTION(connection),
                                       NULL,

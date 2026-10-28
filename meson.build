@@ -116,7 +116,7 @@ executable(
 executable(
   'test-profile-page',
   ['tests/test-profile-page.c', 'src/sections/connection_info.c', 'src/sections/helpers.c',
-   'src/sections/status.c', 'src/sections/vpn.c', 'src/sections/wifi.c'] + data_sources + action_sources,
+   'src/sections/status.c', 'src/sections/traffic.c', 'src/sections/vpn.c', 'src/sections/wifi.c'] + data_sources + action_sources,
   dependencies: gui_deps,
   c_args: gui_args + ['-Wno-deprecated-declarations'],
   include_directories: inc,

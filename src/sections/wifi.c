@@ -3,6 +3,7 @@
 #include "data/connection_state.h"
 #include "data/labels.h"
 #include "sections/helpers.h"
+#include "sections/traffic.h"
 
 #include <string.h>
 
@@ -555,7 +556,8 @@ wifi_entry_subtitle(WifiEntry *entry, WifiMember *member, NMRemoteConnection *sa
     g_autofree char *iface_part = g_strdup_printf("Interface %s", iface != NULL ? iface : "unknown");
     append_subtitle_part(subtitle, iface_part);
   }
-  if (saved != NULL)
+  /* Connected and connecting rows are saved by definition. */
+  if (saved != NULL && !row_state_preferred(member->row_state))
     append_subtitle_part(subtitle, "Saved");
   return g_string_free(g_steal_pointer(&subtitle), FALSE);
 }
@@ -669,6 +671,48 @@ on_add_wifi_clicked(GtkButton *button, gpointer user_data)
   network_sidebar_actions_open_editor(user_data, (const char *const[]) { "--create", "--type=802-11-wireless", NULL });
 }
 
+/* What a connecting device is waiting on, in words. */
+static const char *
+connecting_phase(NMDevice *device)
+{
+  switch (device != NULL ? nm_device_get_state(device) : NM_DEVICE_STATE_UNKNOWN) {
+  case NM_DEVICE_STATE_PREPARE: return "Preparing";
+  case NM_DEVICE_STATE_CONFIG: return "Associating";
+  case NM_DEVICE_STATE_NEED_AUTH: return "Waiting for password";
+  case NM_DEVICE_STATE_IP_CONFIG: return "Getting IP address";
+  case NM_DEVICE_STATE_IP_CHECK: return "Checking connectivity";
+  case NM_DEVICE_STATE_SECONDARIES: return "Starting secondary connections";
+  default: return "Connecting";
+  }
+}
+
+static char *
+status_subtitle(NetworkSidebarRowState state, NMDevice *device, const char *details)
+{
+  const char *status = NULL;
+
+  if (state == NETWORK_SIDEBAR_ROW_STATE_ACTIVE)
+    status = "Connected";
+  else if (state == NETWORK_SIDEBAR_ROW_STATE_CONNECTING)
+    status = connecting_phase(device);
+  if (status == NULL)
+    return g_strdup(details);
+  if (details == NULL || *details == '\0')
+    return g_strdup(status);
+  return g_strdup_printf("%s - %s", status, details);
+}
+
+static void
+add_connecting_spinner(GtkWidget *row, NetworkSidebarRowState state)
+{
+  if (state == NETWORK_SIDEBAR_ROW_STATE_CONNECTING) {
+    GtkWidget *spinner = adw_spinner_new();
+    gtk_widget_set_size_request(spinner, 16, 16);
+    gtk_widget_set_valign(spinner, GTK_ALIGN_CENTER);
+    adw_action_row_add_suffix(ADW_ACTION_ROW(row), spinner);
+  }
+}
+
 static char *
 saved_profile_row_subtitle(NMRemoteConnection *profile, NMActiveConnection *active, NetworkSidebarRowState row_state)
 {
@@ -676,7 +720,7 @@ saved_profile_row_subtitle(NMRemoteConnection *profile, NMActiveConnection *acti
   g_autofree char *details = network_sidebar_wifi_profile_subtitle(profile);
 
   if (row_state == NETWORK_SIDEBAR_ROW_STATE_ACTIVE)
-    append_subtitle_part(subtitle, "Active");
+    append_subtitle_part(subtitle, "Connected");
   else if (row_state == NETWORK_SIDEBAR_ROW_STATE_CONNECTING)
     append_subtitle_part(subtitle, "Connecting");
   else if (active != NULL)
@@ -717,6 +761,7 @@ add_saved_profile_row(GtkListBox *list, NMClient *client, NetworkSidebarActions 
   row_action->active = active != NULL ? g_object_ref(active) : NULL;
   row_action->saved = g_object_ref(profile);
   network_sidebar_apply_row_state(row, row_state);
+  add_connecting_spinner(row, row_state);
 
   add_wifi_row_controls(row, row_action);
 
@@ -798,7 +843,7 @@ add_empty_saved_row(GtkListBox *list, const char *title)
   gtk_list_box_append(list, network_sidebar_action_row(title, NULL, NULL));
 }
 
-static void
+static gboolean
 add_saved_profiles_only_group(AdwPreferencesGroup *group,
                               NMClient *client,
                               NetworkSidebarActions *actions,
@@ -811,13 +856,14 @@ add_saved_profiles_only_group(AdwPreferencesGroup *group,
 
   out_of_range_count = unmatched_saved_profile_count(client, profiles, NULL);
   if (out_of_range_count == 0)
-    return;
+    return FALSE;
 
   saved_box = subgroup_list("Saved networks", &saved_list);
   adw_preferences_group_add(group, saved_box);
   added = add_unmatched_saved_profile_rows(GTK_LIST_BOX(saved_list), client, actions, profiles, NULL);
   if (added == 0)
     add_empty_saved_row(GTK_LIST_BOX(saved_list), "No saved Wi-Fi profiles");
+  return TRUE;
 }
 
 static void
@@ -831,7 +877,8 @@ add_network_row(GtkListBox *list,
                 NetworkSidebarRowState row_state)
 {
   g_autofree char *title = wifi_entry_title(member, saved, active);
-  g_autofree char *subtitle = wifi_entry_subtitle(entry, member, saved);
+  g_autofree char *details = wifi_entry_subtitle(entry, member, saved);
+  g_autofree char *subtitle = status_subtitle(row_state, NM_DEVICE(member->device), details);
   GtkWidget *row = network_sidebar_action_row(title, subtitle, network_sidebar_signal_icon(nm_access_point_get_strength(member->ap)));
   WifiRowAction *row_action = g_new0(WifiRowAction, 1);
   gboolean can_activate = active != NULL || (nm_client_networking_get_enabled(client) && nm_client_wireless_get_enabled(client));
@@ -842,6 +889,7 @@ add_network_row(GtkListBox *list,
   row_action->active = active != NULL ? g_object_ref(active) : NULL;
   row_action->saved = saved != NULL ? g_object_ref(saved) : NULL;
   network_sidebar_apply_row_state(row, row_state);
+  add_connecting_spinner(row, row_state);
 
   if (row_action->saved || row_action->active) add_wifi_row_controls(row, row_action);
 
@@ -934,10 +982,163 @@ add_network_rows(GtkListBox *connected_list,
   }
 }
 
+/* The saved-networks search entry outlives content rebuilds so its text,
+ * cursor and focus survive the frequent NetworkManager-driven refreshes. */
+static GtkWidget *saved_search;
+static GtkWidget *saved_search_list;
+
+static gboolean
+text_matches(const char *text, const char *query)
+{
+  g_autofree char *folded = NULL;
+
+  if (text == NULL)
+    return FALSE;
+  folded = g_utf8_casefold(text, -1);
+  return strstr(folded, query) != NULL;
+}
+
+static gboolean
+saved_row_visible(GtkListBoxRow *row, gpointer user_data)
+{
+  const char *text = gtk_editable_get_text(GTK_EDITABLE(saved_search));
+  g_autofree char *query = NULL;
+  (void) user_data;
+
+  if (text == NULL || *text == '\0' || !ADW_IS_ACTION_ROW(row))
+    return TRUE;
+  query = g_utf8_casefold(text, -1);
+  return text_matches(adw_preferences_row_get_title(ADW_PREFERENCES_ROW(row)), query) ||
+         text_matches(adw_action_row_get_subtitle(ADW_ACTION_ROW(row)), query);
+}
+
+/* Typing from anywhere starts a search far down the panel: bring the entry
+ * to the top so the matches are visible. */
+static void
+scroll_search_into_view(void)
+{
+  GtkWidget *scrolled = gtk_widget_get_ancestor(saved_search, GTK_TYPE_SCROLLED_WINDOW);
+  GtkWidget *child = scrolled != NULL ? gtk_scrolled_window_get_child(GTK_SCROLLED_WINDOW(scrolled)) : NULL;
+  GtkAdjustment *adjustment;
+  graphene_point_t point;
+
+  if (child == NULL || !gtk_widget_compute_point(saved_search, child, &GRAPHENE_POINT_INIT(0, 0), &point))
+    return;
+  adjustment = gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(scrolled));
+  gtk_adjustment_set_value(adjustment, point.y - 36);
+}
+
+static void
+on_saved_search_changed(GtkSearchEntry *entry, gpointer user_data)
+{
+  const char *text = gtk_editable_get_text(GTK_EDITABLE(entry));
+  (void) user_data;
+  if (saved_search_list != NULL)
+    gtk_list_box_invalidate_filter(GTK_LIST_BOX(saved_search_list));
+  if (text != NULL && *text != '\0')
+    scroll_search_into_view();
+}
+
+static GtkWidget *
+saved_search_entry(void)
+{
+  if (saved_search == NULL) {
+    saved_search = g_object_ref_sink(gtk_search_entry_new());
+    gtk_search_entry_set_placeholder_text(GTK_SEARCH_ENTRY(saved_search), "Search saved networks");
+    g_signal_connect(saved_search, "search-changed", G_CALLBACK(on_saved_search_changed), NULL);
+  }
+  return saved_search;
+}
+
+static void
+make_saved_list_searchable(GtkWidget *saved_box, GtkWidget *saved_list)
+{
+  GtkWidget *entry = saved_search_entry();
+  GtkWidget *parent = gtk_widget_get_parent(entry);
+  GtkWidget *placeholder = gtk_label_new("No matching saved networks");
+
+  if (GTK_IS_BOX(parent))
+    gtk_box_remove(GTK_BOX(parent), entry);
+  gtk_box_insert_child_after(GTK_BOX(saved_box), entry, gtk_widget_get_first_child(saved_box));
+  if (saved_search_list != NULL)
+    g_object_remove_weak_pointer(G_OBJECT(saved_search_list), (gpointer *) &saved_search_list);
+  saved_search_list = saved_list;
+  g_object_add_weak_pointer(G_OBJECT(saved_search_list), (gpointer *) &saved_search_list);
+  gtk_widget_add_css_class(placeholder, "dim-label");
+  gtk_widget_add_css_class(placeholder, "network-search-empty");
+  gtk_list_box_set_placeholder(GTK_LIST_BOX(saved_list), placeholder);
+  gtk_list_box_set_filter_func(GTK_LIST_BOX(saved_list), saved_row_visible, NULL, NULL);
+}
+
 void
-network_sidebar_add_wifi_group(GtkBox *content, NMClient *client, NetworkSidebarActions *actions)
+network_sidebar_wifi_search_reset(void)
+{
+  if (saved_search != NULL)
+    gtk_editable_set_text(GTK_EDITABLE(saved_search), "");
+}
+
+gboolean
+network_sidebar_wifi_search_has_focus(void)
+{
+  GtkRoot *root = saved_search != NULL ? gtk_widget_get_root(saved_search) : NULL;
+  GtkWidget *focus = root != NULL ? gtk_root_get_focus(root) : NULL;
+
+  return focus != NULL && (focus == saved_search || gtk_widget_is_ancestor(focus, saved_search));
+}
+
+void
+network_sidebar_wifi_search_restore_focus(gboolean focus)
+{
+  GtkWidget *text;
+
+  if (saved_search == NULL)
+    return;
+  /* Typing anywhere in the panel searches saved networks. */
+  gtk_search_entry_set_key_capture_widget(GTK_SEARCH_ENTRY(saved_search),
+                                          gtk_widget_get_root(saved_search) != NULL ? GTK_WIDGET(gtk_widget_get_root(saved_search)) : NULL);
+  if (!focus || gtk_widget_get_root(saved_search) == NULL)
+    return;
+  text = GTK_WIDGET(gtk_editable_get_delegate(GTK_EDITABLE(saved_search)));
+  if (GTK_IS_TEXT(text))
+    gtk_text_grab_focus_without_selecting(GTK_TEXT(text));
+  else
+    gtk_widget_grab_focus(saved_search);
+}
+
+static void
+on_rescan_clicked(GtkButton *button, gpointer user_data)
+{
+  (void) button;
+  network_sidebar_actions_rescan(user_data);
+}
+
+static gboolean
+wifi_device_activated(NMClient *client)
+{
+  const GPtrArray *devices = nm_client_get_devices(client);
+
+  for (guint i = 0; devices != NULL && i < devices->len; i++) {
+    NMDevice *device = g_ptr_array_index((GPtrArray *) devices, i);
+    if (nm_device_get_device_type(device) == NM_DEVICE_TYPE_WIFI && nm_device_get_state(device) == NM_DEVICE_STATE_ACTIVATED)
+      return TRUE;
+  }
+  return FALSE;
+}
+
+static GtkWidget *
+discard_group(GtkWidget *group)
+{
+  g_object_unref(g_object_ref_sink(group));
+  return NULL;
+}
+
+/* Returns the group of other networks (available, then saved) for the caller
+ * to place below the VPN section, or NULL when there is none. */
+GtkWidget *
+network_sidebar_add_wifi_group(GtkBox *content, NMClient *client, NetworkSidebarActions *actions, NetworkSidebarTraffic *traffic)
 {
   GtkWidget *group = network_sidebar_section_group("Wi-Fi");
+  GtkWidget *networks = adw_preferences_group_new();
   GtkWidget *header = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
   GtkWidget *add_button = network_sidebar_flat_button("list-add-symbolic", "Add Wi-Fi network");
   const GPtrArray *devices = nm_client_get_devices(client);
@@ -954,7 +1155,24 @@ network_sidebar_add_wifi_group(GtkBox *content, NMClient *client, NetworkSidebar
   guint connected_count = 0;
   guint available_count = 0;
   guint saved_count = 0;
+  gboolean wifi_usable = nm_client_networking_get_enabled(client) &&
+                         nm_client_wireless_hardware_get_enabled(client) &&
+                         nm_client_wireless_get_enabled(client);
 
+  /* Scanning shows as a spinner where the rescan button sits. */
+  if (wifi_usable && network_sidebar_actions_get_wifi_scan_in_progress(actions)) {
+    GtkWidget *spinner = adw_spinner_new();
+    gtk_widget_set_tooltip_text(spinner, "Scanning for networks");
+    gtk_widget_set_size_request(spinner, 16, 16);
+    gtk_widget_set_valign(spinner, GTK_ALIGN_CENTER);
+    gtk_widget_set_margin_start(spinner, 9);
+    gtk_widget_set_margin_end(spinner, 9);
+    gtk_box_append(GTK_BOX(header), spinner);
+  } else if (wifi_usable) {
+    GtkWidget *rescan = network_sidebar_flat_button("view-refresh-symbolic", "Scan for networks");
+    g_signal_connect(rescan, "clicked", G_CALLBACK(on_rescan_clicked), actions);
+    gtk_box_append(GTK_BOX(header), rescan);
+  }
   g_signal_connect(add_button, "clicked", G_CALLBACK(on_add_wifi_clicked), actions);
   gtk_box_append(GTK_BOX(header), add_button);
 
@@ -966,6 +1184,7 @@ network_sidebar_add_wifi_group(GtkBox *content, NMClient *client, NetworkSidebar
     gtk_box_append(GTK_BOX(header), wifi_switch);
   }
   adw_preferences_group_set_header_suffix(ADW_PREFERENCES_GROUP(group), header);
+  gtk_box_append(content, group);
 
   for (guint i = 0; devices != NULL && i < devices->len; i++) {
     NMDevice *device = g_ptr_array_index((GPtrArray *) devices, i);
@@ -978,20 +1197,15 @@ network_sidebar_add_wifi_group(GtkBox *content, NMClient *client, NetworkSidebar
 
   if (!has_wifi_device) {
     network_sidebar_add_notice(ADW_PREFERENCES_GROUP(group), "No Wi-Fi devices", "No wireless adapters are managed", "network-wireless-symbolic");
-    add_saved_profiles_only_group(ADW_PREFERENCES_GROUP(group), client, actions, saved_profiles);
-    gtk_box_append(content, group);
-    return;
+    return add_saved_profiles_only_group(ADW_PREFERENCES_GROUP(networks), client, actions, saved_profiles) ? networks : discard_group(networks);
   }
   if (!nm_client_wireless_hardware_get_enabled(client)) {
     network_sidebar_add_notice(ADW_PREFERENCES_GROUP(group), "Wi-Fi hardware is disabled", "Check airplane mode or the wireless hardware switch", "network-wireless-disabled-symbolic");
-    add_saved_profiles_only_group(ADW_PREFERENCES_GROUP(group), client, actions, saved_profiles);
-    gtk_box_append(content, group);
-    return;
+    return add_saved_profiles_only_group(ADW_PREFERENCES_GROUP(networks), client, actions, saved_profiles) ? networks : discard_group(networks);
   }
   if (!nm_client_wireless_get_enabled(client)) {
-    add_saved_profiles_only_group(ADW_PREFERENCES_GROUP(group), client, actions, saved_profiles);
-    gtk_box_append(content, group);
-    return;
+    network_sidebar_add_notice(ADW_PREFERENCES_GROUP(group), "Wi-Fi is off", NULL, "network-wireless-disabled-symbolic");
+    return add_saved_profiles_only_group(ADW_PREFERENCES_GROUP(networks), client, actions, saved_profiles) ? networks : discard_group(networks);
   }
 
   entries = build_wifi_entries(client);
@@ -1004,8 +1218,7 @@ network_sidebar_add_wifi_group(GtkBox *content, NMClient *client, NetworkSidebar
       network_sidebar_add_notice(ADW_PREFERENCES_GROUP(group), "No networks found", "No access points are currently visible", "network-wireless-signal-none-symbolic");
     if (scan_error != NULL)
       network_sidebar_add_notice(ADW_PREFERENCES_GROUP(group), "Wi-Fi scan failed", scan_error, "dialog-warning-symbolic");
-    gtk_box_append(content, group);
-    return;
+    return discard_group(networks);
   }
 
   if (network_sidebar_actions_get_wifi_scan_error(actions) != NULL)
@@ -1024,16 +1237,16 @@ network_sidebar_add_wifi_group(GtkBox *content, NMClient *client, NetworkSidebar
   }
   g_ptr_array_sort(entries, wifi_entry_compare);
 
+  /* The connected network, with its traffic, is the panel's status card. */
   connected_box = subgroup_list(NULL, &connected_list);
   adw_preferences_group_add(ADW_PREFERENCES_GROUP(group), connected_box);
 
   available_box = subgroup_list("Available networks", &available_list);
-  gtk_widget_add_css_class(available_box, "network-subgroup-separated");
-  adw_preferences_group_add(ADW_PREFERENCES_GROUP(group), available_box);
+  adw_preferences_group_add(ADW_PREFERENCES_GROUP(networks), available_box);
 
   saved_box = subgroup_list("Saved networks", &saved_list);
   gtk_widget_add_css_class(saved_box, "network-subgroup-separated");
-  adw_preferences_group_add(ADW_PREFERENCES_GROUP(group), saved_box);
+  adw_preferences_group_add(ADW_PREFERENCES_GROUP(networks), saved_box);
 
   for (guint i = 0; i < entries->len; i++) {
     WifiEntry *entry = g_ptr_array_index(entries, i);
@@ -1053,11 +1266,16 @@ network_sidebar_add_wifi_group(GtkBox *content, NMClient *client, NetworkSidebar
   saved_count += add_unmatched_saved_profile_rows(GTK_LIST_BOX(saved_list), client, actions, saved_profiles, visible_saved_keys);
 
   if (connected_count == 0)
-    gtk_list_box_append(GTK_LIST_BOX(connected_list), network_sidebar_action_row("No connected networks", NULL, NULL));
+    gtk_list_box_append(GTK_LIST_BOX(connected_list),
+                        network_sidebar_action_row("Not connected", "Choose a network below", "network-wireless-disconnected-symbolic"));
+  else if (wifi_device_activated(client))
+    network_sidebar_traffic_add_rows(traffic, GTK_LIST_BOX(connected_list));
   if (available_count == 0)
     gtk_list_box_append(GTK_LIST_BOX(available_list), network_sidebar_action_row("No other networks in range", NULL, NULL));
   if (saved_count == 0)
     add_empty_saved_row(GTK_LIST_BOX(saved_list), "No saved networks out of range");
+  else
+    make_saved_list_searchable(saved_box, saved_list);
 
-  gtk_box_append(content, group);
+  return networks;
 }

@@ -207,10 +207,35 @@ join_subtitle_parts(const char *first, const char *second)
   return NULL;
 }
 
+/* Collapsed unless a VPN is up or connecting; a manual toggle sticks until
+ * that changes. */
+static int vpn_user_expanded = -1;
+static gboolean vpn_was_active;
+
+static void
+on_vpn_expanded(GObject *row, GParamSpec *pspec, gpointer user_data)
+{
+  (void) pspec;
+  (void) user_data;
+  vpn_user_expanded = adw_expander_row_get_expanded(ADW_EXPANDER_ROW(row));
+}
+
+static GtkWidget *
+notice_row(const char *title, const char *subtitle)
+{
+  return network_sidebar_action_row(title, subtitle, NULL);
+}
+
 void
 network_sidebar_add_vpn_group(GtkBox *content, NMClient *client, NetworkSidebarActions *actions)
 {
-  GtkWidget *group = network_sidebar_section_group("VPN");
+  GtkWidget *group = adw_preferences_group_new();
+  GtkWidget *expander = adw_expander_row_new();
+  g_autofree char *summary = NULL;
+  guint profile_count = 0;
+  NMActiveConnection *shown_active = NULL;
+  NetworkSidebarRowState shown_state = NETWORK_SIDEBAR_ROW_STATE_NONE;
+  gboolean any_active;
   GtkWidget *header_suffix = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
   GtkWidget *create_button = network_sidebar_flat_button("list-add-symbolic", "Create VPN");
   const GPtrArray *connections = nm_client_get_connections(client);
@@ -228,14 +253,18 @@ network_sidebar_add_vpn_group(GtkBox *content, NMClient *client, NetworkSidebarA
     gtk_widget_set_tooltip_text(create_button, "Install a NetworkManager VPN plugin to create profiles");
   g_signal_connect(create_button, "clicked", G_CALLBACK(on_create_vpn_clicked), actions);
   gtk_box_append(GTK_BOX(header_suffix), create_button);
-  adw_preferences_group_set_header_suffix(ADW_PREFERENCES_GROUP(group), header_suffix);
+  gtk_widget_set_valign(header_suffix, GTK_ALIGN_CENTER);
+  adw_expander_row_add_suffix(ADW_EXPANDER_ROW(expander), header_suffix);
+  adw_preferences_row_set_title(ADW_PREFERENCES_ROW(expander), "VPN");
+  adw_expander_row_add_prefix(ADW_EXPANDER_ROW(expander), gtk_image_new_from_icon_name("network-vpn-symbolic"));
+  adw_preferences_group_add(ADW_PREFERENCES_GROUP(group), expander);
 
   if (!editor_available)
-    network_sidebar_add_notice(ADW_PREFERENCES_GROUP(group), "VPN editor unavailable", "Install nm-connection-editor to import, create, or edit VPN profiles", "dialog-warning-symbolic");
+    adw_expander_row_add_row(ADW_EXPANDER_ROW(expander), notice_row("VPN editor unavailable", "Install nm-connection-editor to import, create, or edit VPN profiles"));
   if (plugin_state.discovery_failed)
-    network_sidebar_add_notice(ADW_PREFERENCES_GROUP(group), "VPN plugin status unavailable", "Could not verify installed NetworkManager VPN plugins; VPN actions remain available", "dialog-warning-symbolic");
+    adw_expander_row_add_row(ADW_EXPANDER_ROW(expander), notice_row("VPN plugin status unavailable", "Could not verify installed NetworkManager VPN plugins; VPN actions remain available"));
   else if (plugins_known_missing)
-    network_sidebar_add_notice(ADW_PREFERENCES_GROUP(group), "No VPN plugins installed", "Install a NetworkManager VPN plugin to import, create, or activate VPN profiles", "dialog-warning-symbolic");
+    adw_expander_row_add_row(ADW_EXPANDER_ROW(expander), notice_row("No VPN plugins installed", "Install a NetworkManager VPN plugin to import, create, or activate VPN profiles"));
 
   for (guint i = 0; connections != NULL && i < connections->len; i++) {
     NMRemoteConnection *connection = g_ptr_array_index((GPtrArray *) connections, i);
@@ -304,7 +333,19 @@ network_sidebar_add_vpn_group(GtkBox *content, NMClient *client, NetworkSidebarA
 
     gtk_list_box_row_set_activatable(GTK_LIST_BOX_ROW(row), can_activate);
     g_signal_connect_data(row, "activated", G_CALLBACK(on_vpn_row_activated), row_action, vpn_row_action_closure_notify, 0);
-    adw_preferences_group_add(ADW_PREFERENCES_GROUP(group), row);
+    if (network_sidebar_vpn_row_state(active) == NETWORK_SIDEBAR_ROW_STATE_CONNECTING)
+      {
+      GtkWidget *spinner = adw_spinner_new();
+      gtk_widget_set_size_request(spinner, 16, 16);
+      gtk_widget_set_valign(spinner, GTK_ALIGN_CENTER);
+      adw_action_row_add_suffix(ADW_ACTION_ROW(row), spinner);
+    }
+    if (active != NULL && (shown_active == NULL || network_sidebar_vpn_row_state(active) == NETWORK_SIDEBAR_ROW_STATE_ACTIVE)) {
+      shown_active = active;
+      shown_state = network_sidebar_vpn_row_state(active);
+    }
+    adw_expander_row_add_row(ADW_EXPANDER_ROW(expander), row);
+    profile_count++;
     added = TRUE;
   }
 
@@ -317,8 +358,24 @@ network_sidebar_add_vpn_group(GtkBox *content, NMClient *client, NetworkSidebarA
       empty_subtitle = "Install nm-connection-editor to add one";
     else
       empty_subtitle = "Install a NetworkManager VPN plugin to add one";
-    network_sidebar_add_notice(ADW_PREFERENCES_GROUP(group), "No VPN profiles", empty_subtitle, "network-vpn-symbolic");
+    adw_expander_row_add_row(ADW_EXPANDER_ROW(expander), notice_row("No VPN profiles", empty_subtitle));
   }
+
+  any_active = shown_state == NETWORK_SIDEBAR_ROW_STATE_ACTIVE || shown_state == NETWORK_SIDEBAR_ROW_STATE_CONNECTING;
+  if (shown_active != NULL)
+    summary = g_strdup_printf("%s: %s", shown_state == NETWORK_SIDEBAR_ROW_STATE_ACTIVE ? "Connected" : "Connecting",
+                              nm_active_connection_get_id(shown_active));
+  else if (plugins_known_missing)
+    summary = g_strdup("No VPN plugins installed");
+  else
+    summary = g_strdup_printf("%u profile%s", profile_count, profile_count == 1 ? "" : "s");
+  adw_expander_row_set_subtitle(ADW_EXPANDER_ROW(expander), summary);
+  network_sidebar_apply_row_state(expander, shown_state);
+  if (any_active != vpn_was_active)
+    vpn_user_expanded = -1;
+  vpn_was_active = any_active;
+  adw_expander_row_set_expanded(ADW_EXPANDER_ROW(expander), vpn_user_expanded >= 0 ? vpn_user_expanded : any_active);
+  g_signal_connect(expander, "notify::expanded", G_CALLBACK(on_vpn_expanded), NULL);
 
   gtk_box_append(content, group);
   vpn_plugin_state_clear(&plugin_state);
