@@ -16,6 +16,7 @@ gtk_dep = dependency('gtk4')
 adw_dep = dependency('libadwaita-1', version: '>= 1.3')
 nm_dep = dependency('libnm')
 layer_shell_dep = dependency('gtk4-layer-shell-0')
+m_dep = meson.get_compiler('c').find_library('m', required: false)
 
 source_root = meson.project_source_root()
 installed_css_path = join_paths(get_option('prefix'), get_option('datadir'), 'nm-sidebar', 'nm-sidebar.css')
@@ -56,6 +57,7 @@ section_sources = [
   'src/sections/connection-settings.c',
   'src/sections/helpers.c',
   'src/sections/status.c',
+  'src/sections/traffic.c',
   'src/sections/vpn.c',
   'src/sections/wifi.c',
 ]
@@ -79,7 +81,7 @@ executable(
     'src/gui/main.c',
     'src/gui/styles.c',
   ] + core_sources + data_sources + action_sources + section_sources,
-  dependencies: [glib_dep, gio_dep, gtk_dep, adw_dep, nm_dep, layer_shell_dep],
+  dependencies: [glib_dep, gio_dep, gtk_dep, adw_dep, nm_dep, layer_shell_dep, m_dep],
   c_args: gui_args,
   include_directories: include_directories('src'),
   install: true,
@@ -92,7 +94,7 @@ install_data(
 )
 
 inc = include_directories('src')
-gui_deps = [glib_dep, gio_dep, gtk_dep, adw_dep, nm_dep]
+gui_deps = [glib_dep, gio_dep, gtk_dep, adw_dep, nm_dep, m_dep]
 
 test('profile-model', executable(
   'test-profile-model',

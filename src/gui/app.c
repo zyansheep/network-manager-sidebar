@@ -11,6 +11,7 @@
 #include "sections/connection_info.h"
 #include "sections/helpers.h"
 #include "sections/status.h"
+#include "sections/traffic.h"
 #include "sections/vpn.h"
 #include "sections/wifi.h"
 
@@ -36,6 +37,8 @@ struct _NetworkSidebarGuiApp {
   GtkWidget *surface;
   GtkWidget *toast_overlay;
   AdwNavigationView *navigation;
+  AdwNavigationPage *root_page;
+  NetworkSidebarTraffic *traffic;
   GtkWidget *back_button;
   GtkWidget *title;
   GtkWidget *info_button;
@@ -277,6 +280,7 @@ on_shutdown(GApplication *application, gpointer user_data)
   }
   cancel_scroll_restore(self);
   g_clear_pointer(&self->refresh_signal_handlers, g_ptr_array_unref);
+  g_clear_pointer(&self->traffic, network_sidebar_traffic_free);
 
   if (self->server != NULL) {
     network_sidebar_command_server_close(self->server);
@@ -588,6 +592,26 @@ go_back_to_parent_screen(NetworkSidebarGuiApp *self)
   return TRUE;
 }
 
+/* Esc dismisses the sidebar from any depth: the next show starts at the
+ * network list instead of a leftover dialog or page. */
+static void
+close_everything(NetworkSidebarGuiApp *self)
+{
+  AdwDialog *dialog = adw_application_window_get_visible_dialog(ADW_APPLICATION_WINDOW(self->window));
+  AdwNavigationPage *visible = self->navigation ? adw_navigation_view_get_visible_page(self->navigation) : NULL;
+
+  if (dialog != NULL)
+    adw_dialog_close(dialog);
+  /* A page that cannot pop is mid-save; leave it to finish. */
+  if (visible != NULL && visible != self->root_page && adw_navigation_page_get_can_pop(visible))
+    adw_navigation_view_pop_to_page(self->navigation, self->root_page);
+  if (self->showing_connection_information) {
+    self->showing_connection_information = FALSE;
+    refresh_content(self, FALSE);
+  }
+  hide_sidebar(self);
+}
+
 static gboolean
 on_key_pressed(GtkEventControllerKey *controller,
                guint keyval,
@@ -601,13 +625,7 @@ on_key_pressed(GtkEventControllerKey *controller,
   (void) state;
 
   if (keyval == GDK_KEY_Escape) {
-    AdwNavigationPage *visible = self->navigation ? adw_navigation_view_get_visible_page(self->navigation) : NULL;
-    if (visible && adw_navigation_view_get_previous_page(self->navigation, visible)) {
-      if (adw_navigation_page_get_can_pop(visible)) adw_navigation_view_pop(self->navigation);
-      return TRUE;
-    }
-    if (!go_back_to_parent_screen(self))
-      hide_sidebar(self);
+    close_everything(self);
     return TRUE;
   }
   return FALSE;
@@ -712,8 +730,18 @@ on_window_map(GtkWidget *widget, gpointer user_data)
     fail_layer_shell(self, error != NULL ? error->message : NETWORK_SIDEBAR_LAYER_SHELL_REQUIRED_MESSAGE);
     return;
   }
+  network_sidebar_traffic_set_active(self->traffic, TRUE);
   update_scroll_fades(self);
   scan_wifi_on_show(self);
+}
+
+static void
+on_window_unmap(GtkWidget *widget, gpointer user_data)
+{
+  NetworkSidebarGuiApp *self = user_data;
+  (void) widget;
+
+  network_sidebar_traffic_set_active(self->traffic, FALSE);
 }
 
 static GtkWidget *
@@ -915,7 +943,8 @@ ensure_window(NetworkSidebarGuiApp *self)
   gtk_widget_set_margin_start(panel_content, 12);
   gtk_widget_set_margin_end(panel_content, 12);
   self->navigation = ADW_NAVIGATION_VIEW(adw_navigation_view_new());
-  adw_navigation_view_add(self->navigation, adw_navigation_page_new(panel_content, "Networks"));
+  self->root_page = adw_navigation_page_new(panel_content, "Networks");
+  adw_navigation_view_add(self->navigation, self->root_page);
   adw_toast_overlay_set_child(ADW_TOAST_OVERLAY(self->toast_overlay), GTK_WIDGET(self->navigation));
   network_sidebar_actions_set_navigation(self->actions, self->navigation);
 
@@ -980,15 +1009,20 @@ ensure_window(NetworkSidebarGuiApp *self)
   gtk_widget_add_controller(self->surface, GTK_EVENT_CONTROLLER(click_controller));
 
   key_controller = gtk_event_controller_key_new();
+  /* Capture, so Esc closes the whole sidebar before a dialog or page eats it. */
+  gtk_event_controller_set_propagation_phase(key_controller, GTK_PHASE_CAPTURE);
   g_signal_connect(key_controller, "key-pressed", G_CALLBACK(on_key_pressed), self);
   gtk_widget_add_controller(self->window, key_controller);
 
   g_signal_connect(self->window, "close-request", G_CALLBACK(on_close_request), self);
   g_signal_connect(self->window, "notify::is-active", G_CALLBACK(on_window_active_changed), self);
   g_signal_connect(self->window, "map", G_CALLBACK(on_window_map), self);
+  g_signal_connect(self->window, "unmap", G_CALLBACK(on_window_unmap), self);
 
   ensure_actions(self);
   sync_refresh_signals(self);
+  if (self->traffic == NULL && self->client != NULL)
+    self->traffic = network_sidebar_traffic_new(self->client);
   if (self->periodic_refresh_source == 0)
     self->periodic_refresh_source = g_timeout_add_seconds(60, periodic_refresh_cb, self);
   return TRUE;
@@ -1169,6 +1203,7 @@ refresh_content(NetworkSidebarGuiApp *self, gboolean preserve_scroll)
     gtk_widget_set_visible(self->networking_switch, TRUE);
     network_sidebar_add_status_group(GTK_BOX(self->content), self->client, self->actions);
     network_sidebar_add_vpn_group(GTK_BOX(self->content), self->client, self->actions);
+    network_sidebar_traffic_attach(self->traffic, GTK_BOX(self->content));
     network_sidebar_add_wifi_group(GTK_BOX(self->content), self->client, self->actions);
   }
   self->refreshing = FALSE;
