@@ -43,7 +43,7 @@ int main(int argc, char **argv) {
   loop = g_main_loop_new(NULL,FALSE);
   NMClient *client = nm_client_new(NULL,&failure);
   if(!client) goto done;
-  NetworkSidebarActions *actions = network_sidebar_actions_new(client,notify,refresh,NULL);
+  NetworkSidebarActions *actions = network_sidebar_actions_new(client,notify,refresh,NULL,NULL);
   NMConnection *connection = nm_simple_connection_new();
   char *uuid = g_uuid_string_random();
   char *name = g_strdup_printf("nm-sidebar-test-%.8s",uuid);

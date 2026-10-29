@@ -38,7 +38,7 @@ int main(int argc, char **argv)
   adw_init();
   g_autoptr(NMClient) client = nm_client_new(NULL, &failure);
   if (!client) { fprintf(stderr, "%s\n", failure->message); return 1; }
-  g_autoptr(NetworkSidebarActions) actions = network_sidebar_actions_new(client, toast, refresh, NULL);
+  g_autoptr(NetworkSidebarActions) actions = network_sidebar_actions_new(client, toast, refresh, NULL, NULL);
   g_autoptr(NMConnection) connection = nm_simple_connection_new();
   g_autofree char *uuid = g_uuid_string_random();
   g_autofree char *name = g_strdup_printf("nm-sidebar-test-%.8s", uuid);

@@ -10,8 +10,7 @@ G_BEGIN_DECLS
 
 /* Appends the Wi-Fi status group (connected network + traffic) and returns
  * the available/saved networks group for the caller to append, or NULL. */
-GtkWidget *network_sidebar_add_wifi_group(GtkBox *content,
-                                          NMClient *client,
+GtkWidget *network_sidebar_add_wifi_group(GtkBox *content, NMClient *client,
                                           NetworkSidebarActions *actions,
                                           NetworkSidebarTraffic *traffic);
 /* The saved-networks search keeps focus across content rebuilds: ask before

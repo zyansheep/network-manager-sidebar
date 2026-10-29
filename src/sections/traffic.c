@@ -59,29 +59,25 @@ typedef struct {
 } VnstatParser;
 
 /* Download and upload: categorical slots 1 and 2, stepped per mode. */
-static void
-series_color(int series, GdkRGBA *color)
-{
+static void series_color(int series, GdkRGBA *color) {
   gboolean dark = adw_style_manager_get_dark(adw_style_manager_get_default());
-  const char *hex = series == 0 ? (dark ? "#3987e5" : "#2a78d6") : (dark ? "#d95926" : "#eb6834");
+  const char *hex = series == 0 ? (dark ? "#3987e5" : "#2a78d6")
+                                : (dark ? "#d95926" : "#eb6834");
   gdk_rgba_parse(color, hex);
 }
 
-static char *
-series_dot(int series)
-{
+static char *series_dot(int series) {
   GdkRGBA color;
   g_autofree char *hex = NULL;
   series_color(series, &color);
-  hex = g_strdup_printf("#%02x%02x%02x", (int) (color.red * 255), (int) (color.green * 255), (int) (color.blue * 255));
+  hex = g_strdup_printf("#%02x%02x%02x", (int)(color.red * 255),
+                        (int)(color.green * 255), (int)(color.blue * 255));
   return g_strdup_printf("<span foreground=\"%s\">●</span>", hex);
 }
 
 /* Three significant digits (9.13 MB, 37.2 kB, 500 kB) keep the width steady. */
-static char *
-format_bytes(double bytes)
-{
-  static const char *units[] = { "kB", "MB", "GB", "TB" };
+static char *format_bytes(double bytes) {
+  static const char *units[] = {"kB", "MB", "GB", "TB"};
   guint unit = 0;
 
   if (bytes < 1000)
@@ -98,36 +94,31 @@ format_bytes(double bytes)
   return g_strdup_printf("%.0f %s", bytes, units[unit]);
 }
 
-static char *
-format_rate(double bytes_per_second)
-{
+static char *format_rate(double bytes_per_second) {
   g_autofree char *size = format_bytes(bytes_per_second);
   return g_strdup_printf("%s/s", size);
 }
 
-static const RateSample *
-sample_at(NetworkSidebarTraffic *self, guint index_from_oldest)
-{
+static const RateSample *sample_at(NetworkSidebarTraffic *self,
+                                   guint index_from_oldest) {
   guint oldest = (self->head + TRAFFIC_HISTORY - self->count) % TRAFFIC_HISTORY;
   return &self->samples[(oldest + index_from_oldest) % TRAFFIC_HISTORY];
 }
 
-static const char *
-wifi_iface(NMClient *client)
-{
+static const char *wifi_iface(NMClient *client) {
   const GPtrArray *devices = nm_client_get_devices(client);
   for (guint i = 0; devices != NULL && i < devices->len; i++) {
-    NMDevice *device = g_ptr_array_index((GPtrArray *) devices, i);
+    NMDevice *device = g_ptr_array_index((GPtrArray *)devices, i);
     if (nm_device_get_device_type(device) == NM_DEVICE_TYPE_WIFI)
       return nm_device_get_iface(device);
   }
   return NULL;
 }
 
-static gboolean
-read_counter(const char *iface, const char *name, guint64 *value)
-{
-  g_autofree char *path = g_strdup_printf("/sys/class/net/%s/statistics/%s", iface, name);
+static gboolean read_counter(const char *iface, const char *name,
+                             guint64 *value) {
+  g_autofree char *path =
+      g_strdup_printf("/sys/class/net/%s/statistics/%s", iface, name);
   g_autofree char *contents = NULL;
   if (!g_file_get_contents(path, &contents, NULL, NULL))
     return FALSE;
@@ -135,9 +126,7 @@ read_counter(const char *iface, const char *name, guint64 *value)
   return TRUE;
 }
 
-static void
-update_rate_label(NetworkSidebarTraffic *self)
-{
+static void update_rate_label(NetworkSidebarTraffic *self) {
   g_autofree char *down_dot = series_dot(0);
   g_autofree char *up_dot = series_dot(1);
   g_autofree char *down = NULL;
@@ -159,14 +148,13 @@ update_rate_label(NetworkSidebarTraffic *self)
   gtk_label_set_markup(GTK_LABEL(self->up_label), up_markup);
 }
 
-static void
-take_sample(NetworkSidebarTraffic *self)
-{
+static void take_sample(NetworkSidebarTraffic *self) {
   const char *iface = wifi_iface(self->client);
   guint64 rx, tx;
   gint64 now = g_get_monotonic_time();
 
-  if (iface == NULL || !read_counter(iface, "rx_bytes", &rx) || !read_counter(iface, "tx_bytes", &tx)) {
+  if (iface == NULL || !read_counter(iface, "rx_bytes", &rx) ||
+      !read_counter(iface, "tx_bytes", &tx)) {
     self->have_last = FALSE;
     return;
   }
@@ -180,8 +168,9 @@ take_sample(NetworkSidebarTraffic *self)
   }
   /* Counters restart when the interface is recreated; rebase instead of
    * plotting a negative rate. */
-  if (self->have_last && rx >= self->last_rx && tx >= self->last_tx && now > self->last_time) {
-    double seconds = (now - self->last_time) / (double) G_USEC_PER_SEC;
+  if (self->have_last && rx >= self->last_rx && tx >= self->last_tx &&
+      now > self->last_time) {
+    double seconds = (now - self->last_time) / (double)G_USEC_PER_SEC;
     RateSample *sample = &self->samples[self->head];
     sample->time = now;
     sample->rx = (rx - self->last_rx) / seconds;
@@ -195,86 +184,90 @@ take_sample(NetworkSidebarTraffic *self)
   self->have_last = TRUE;
 }
 
-/* vnstat --xml: <days><day id=".."><date><year/><month/><day/></date><rx/><tx/></day>... */
-static const char *
-stack_name(VnstatParser *parser, guint from_top)
-{
+/* vnstat --xml: <days><day
+ * id=".."><date><year/><month/><day/></date><rx/><tx/></day>... */
+static const char *stack_name(VnstatParser *parser, guint from_top) {
   if (parser->stack->len <= from_top)
     return NULL;
   return g_ptr_array_index(parser->stack, parser->stack->len - 1 - from_top);
 }
 
-static void
-vnstat_start(GMarkupParseContext *context, const char *name, const char **attribute_names,
-             const char **attribute_values, gpointer user_data, GError **error)
-{
+static void vnstat_start(GMarkupParseContext *context, const char *name,
+                         const char **attribute_names,
+                         const char **attribute_values, gpointer user_data,
+                         GError **error) {
   VnstatParser *parser = user_data;
-  (void) context;
-  (void) attribute_names;
-  (void) attribute_values;
-  (void) error;
+  (void)context;
+  (void)attribute_names;
+  (void)attribute_values;
+  (void)error;
 
-  if (g_strcmp0(name, "day") == 0 && g_strcmp0(stack_name(parser, 0), "days") == 0) {
+  if (g_strcmp0(name, "day") == 0 &&
+      g_strcmp0(stack_name(parser, 0), "days") == 0) {
     memset(&parser->current, 0, sizeof parser->current);
     parser->in_day = TRUE;
   }
   g_ptr_array_add(parser->stack, g_strdup(name));
 }
 
-static void
-vnstat_end(GMarkupParseContext *context, const char *name, gpointer user_data, GError **error)
-{
+static void vnstat_end(GMarkupParseContext *context, const char *name,
+                       gpointer user_data, GError **error) {
   VnstatParser *parser = user_data;
-  (void) context;
-  (void) error;
+  (void)context;
+  (void)error;
 
   if (parser->stack->len > 0)
     g_ptr_array_remove_index(parser->stack, parser->stack->len - 1);
-  if (parser->in_day && g_strcmp0(name, "day") == 0 && g_strcmp0(stack_name(parser, 0), "days") == 0) {
+  if (parser->in_day && g_strcmp0(name, "day") == 0 &&
+      g_strcmp0(stack_name(parser, 0), "days") == 0) {
     g_array_append_val(parser->days, parser->current);
     parser->in_day = FALSE;
   }
 }
 
-static void
-vnstat_text(GMarkupParseContext *context, const char *text, gsize text_len, gpointer user_data, GError **error)
-{
+static void vnstat_text(GMarkupParseContext *context, const char *text,
+                        gsize text_len, gpointer user_data, GError **error) {
   VnstatParser *parser = user_data;
   const char *element = stack_name(parser, 0);
   const char *parent = stack_name(parser, 1);
   g_autofree char *value = NULL;
-  (void) context;
-  (void) error;
+  (void)context;
+  (void)error;
 
   if (!parser->in_day || element == NULL || parent == NULL)
     return;
   value = g_strndup(text, text_len);
   if (g_strcmp0(parent, "date") == 0) {
-    int number = (int) g_ascii_strtoll(value, NULL, 10);
-    if (g_strcmp0(element, "year") == 0) parser->current.year = number;
-    else if (g_strcmp0(element, "month") == 0) parser->current.month = number;
-    else if (g_strcmp0(element, "day") == 0) parser->current.day = number;
+    int number = (int)g_ascii_strtoll(value, NULL, 10);
+    if (g_strcmp0(element, "year") == 0)
+      parser->current.year = number;
+    else if (g_strcmp0(element, "month") == 0)
+      parser->current.month = number;
+    else if (g_strcmp0(element, "day") == 0)
+      parser->current.day = number;
   } else if (g_strcmp0(parent, "day") == 0) {
-    if (g_strcmp0(element, "rx") == 0) parser->current.rx = g_ascii_strtoull(value, NULL, 10);
-    else if (g_strcmp0(element, "tx") == 0) parser->current.tx = g_ascii_strtoull(value, NULL, 10);
+    if (g_strcmp0(element, "rx") == 0)
+      parser->current.rx = g_ascii_strtoull(value, NULL, 10);
+    else if (g_strcmp0(element, "tx") == 0)
+      parser->current.tx = g_ascii_strtoull(value, NULL, 10);
   }
 }
 
-static gboolean
-parse_vnstat(const char *xml, GArray *days)
-{
-  static const GMarkupParser callbacks = { vnstat_start, vnstat_end, vnstat_text, NULL, NULL };
-  VnstatParser parser = { g_ptr_array_new_with_free_func(g_free), { 0 }, FALSE, days };
-  GMarkupParseContext *context = g_markup_parse_context_new(&callbacks, 0, &parser, NULL);
-  gboolean ok = g_markup_parse_context_parse(context, xml, -1, NULL) && g_markup_parse_context_end_parse(context, NULL);
+static gboolean parse_vnstat(const char *xml, GArray *days) {
+  static const GMarkupParser callbacks = {vnstat_start, vnstat_end, vnstat_text,
+                                          NULL, NULL};
+  VnstatParser parser = {
+      g_ptr_array_new_with_free_func(g_free), {0}, FALSE, days};
+  GMarkupParseContext *context =
+      g_markup_parse_context_new(&callbacks, 0, &parser, NULL);
+  gboolean ok = g_markup_parse_context_parse(context, xml, -1, NULL) &&
+                g_markup_parse_context_end_parse(context, NULL);
   g_markup_parse_context_free(context);
   g_ptr_array_unref(parser.stack);
   return ok;
 }
 
-static void
-update_usage(NetworkSidebarTraffic *self)
-{
+static void update_usage(NetworkSidebarTraffic *self) {
   g_autoptr(GDateTime) now = g_date_time_new_now_local();
   g_autofree char *month_name = g_date_time_format(now, "%B");
   guint64 today_rx = 0, today_tx = 0, month_rx = 0, month_tx = 0;
@@ -290,7 +283,8 @@ update_usage(NetworkSidebarTraffic *self)
     return;
   for (guint i = 0; i < self->n_days; i++) {
     const DayUsage *day = &self->days[i];
-    if (day->year != g_date_time_get_year(now) || day->month != g_date_time_get_month(now))
+    if (day->year != g_date_time_get_year(now) ||
+        day->month != g_date_time_get_month(now))
       continue;
     month_rx += day->rx;
     month_tx += day->tx;
@@ -310,62 +304,61 @@ update_usage(NetworkSidebarTraffic *self)
   gtk_widget_queue_draw(self->days_area);
 }
 
-static void
-vnstat_finished(GObject *source, GAsyncResult *result, gpointer user_data)
-{
+static void vnstat_finished(GObject *source, GAsyncResult *result,
+                            gpointer user_data) {
   NetworkSidebarTraffic *self = user_data;
   g_autofree char *output = NULL;
   g_autoptr(GError) error = NULL;
   g_autoptr(GArray) days = g_array_new(FALSE, TRUE, sizeof(DayUsage));
 
-  if (!g_subprocess_communicate_utf8_finish(G_SUBPROCESS(source), result, &output, NULL, &error)) {
+  if (!g_subprocess_communicate_utf8_finish(G_SUBPROCESS(source), result,
+                                            &output, NULL, &error)) {
     if (g_error_matches(error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
       return;
   }
   g_clear_object(&self->vnstat_cancel);
   self->n_days = 0;
-  if (output != NULL && g_subprocess_get_successful(G_SUBPROCESS(source)) && parse_vnstat(output, days)) {
-    guint first = days->len > TRAFFIC_DAYS + 1 ? days->len - (TRAFFIC_DAYS + 1) : 0;
+  if (output != NULL && g_subprocess_get_successful(G_SUBPROCESS(source)) &&
+      parse_vnstat(output, days)) {
+    guint first =
+        days->len > TRAFFIC_DAYS + 1 ? days->len - (TRAFFIC_DAYS + 1) : 0;
     for (guint i = first; i < days->len; i++)
       self->days[self->n_days++] = g_array_index(days, DayUsage, i);
   }
   update_usage(self);
 }
 
-static const char *
-vnstat_program(void)
-{
+static const char *vnstat_program(void) {
   static char *program = NULL;
   if (program == NULL) {
     program = g_find_program_in_path("vnstat");
-    if (program == NULL && g_file_test("/run/current-system/sw/bin/vnstat", G_FILE_TEST_IS_EXECUTABLE))
+    if (program == NULL && g_file_test("/run/current-system/sw/bin/vnstat",
+                                       G_FILE_TEST_IS_EXECUTABLE))
       program = g_strdup("/run/current-system/sw/bin/vnstat");
   }
   return program;
 }
 
-static void
-refresh_vnstat(NetworkSidebarTraffic *self)
-{
+static void refresh_vnstat(NetworkSidebarTraffic *self) {
   const char *program = vnstat_program();
   g_autoptr(GSubprocess) process = NULL;
 
   if (self->iface == NULL || program == NULL || self->vnstat_cancel != NULL)
     return;
   self->vnstat_time = g_get_monotonic_time();
-  process = g_subprocess_new(G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDERR_SILENCE, NULL,
-                             program, "-i", self->iface, "--xml", "d", "31", NULL);
+  process = g_subprocess_new(
+      G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDERR_SILENCE, NULL,
+      program, "-i", self->iface, "--xml", "d", "31", NULL);
   if (process == NULL)
     return;
   self->vnstat_cancel = g_cancellable_new();
-  g_subprocess_communicate_utf8_async(process, NULL, self->vnstat_cancel, vnstat_finished, self);
+  g_subprocess_communicate_utf8_async(process, NULL, self->vnstat_cancel,
+                                      vnstat_finished, self);
 }
 
 static void restart_sampling(NetworkSidebarTraffic *self);
 
-static gboolean
-sample_cb(gpointer user_data)
-{
+static gboolean sample_cb(gpointer user_data) {
   NetworkSidebarTraffic *self = user_data;
 
   take_sample(self);
@@ -378,24 +371,21 @@ sample_cb(gpointer user_data)
   return G_SOURCE_CONTINUE;
 }
 
-static void
-restart_sampling(NetworkSidebarTraffic *self)
-{
+static void restart_sampling(NetworkSidebarTraffic *self) {
   g_clear_handle_id(&self->sample_source, g_source_remove);
   /* Hidden: second-granularity timers coalesce with other wakeups. */
-  self->sample_source = self->active ? g_timeout_add(1000, sample_cb, self)
-                                     : g_timeout_add_seconds(2, sample_cb, self);
+  self->sample_source = self->active
+                            ? g_timeout_add(1000, sample_cb, self)
+                            : g_timeout_add_seconds(2, sample_cb, self);
 }
 
-static void
-set_source_rgba_alpha(cairo_t *cr, const GdkRGBA *color, double alpha)
-{
-  cairo_set_source_rgba(cr, color->red, color->green, color->blue, color->alpha * alpha);
+static void set_source_rgba_alpha(cairo_t *cr, const GdkRGBA *color,
+                                  double alpha) {
+  cairo_set_source_rgba(cr, color->red, color->green, color->blue,
+                        color->alpha * alpha);
 }
 
-static void
-draw_scale_label(GtkWidget *widget, cairo_t *cr, const char *text)
-{
+static void draw_scale_label(GtkWidget *widget, cairo_t *cr, const char *text) {
   PangoLayout *layout = gtk_widget_create_pango_layout(widget, text);
   PangoAttrList *attrs = pango_attr_list_new();
   GdkRGBA fg;
@@ -410,20 +400,17 @@ draw_scale_label(GtkWidget *widget, cairo_t *cr, const char *text)
   g_object_unref(layout);
 }
 
-static double
-nice_ceiling(double value)
-{
+static double nice_ceiling(double value) {
   double magnitude = pow(10, floor(log10(value)));
-  double steps[] = { 1, 2, 5, 10 };
+  double steps[] = {1, 2, 5, 10};
   for (guint i = 0; i < G_N_ELEMENTS(steps); i++)
     if (value <= steps[i] * magnitude)
       return steps[i] * magnitude;
   return 10 * magnitude;
 }
 
-static void
-draw_baseline(GtkWidget *widget, cairo_t *cr, int width, int height)
-{
+static void draw_baseline(GtkWidget *widget, cairo_t *cr, int width,
+                          int height) {
   GdkRGBA fg;
   gtk_widget_get_color(widget, &fg);
   set_source_rgba_alpha(cr, &fg, 0.14);
@@ -431,9 +418,9 @@ draw_baseline(GtkWidget *widget, cairo_t *cr, int width, int height)
   cairo_fill(cr);
 }
 
-static void
-trace_series(cairo_t *cr, NetworkSidebarTraffic *self, int series, gint64 now, int width, int height, double scale, gboolean close)
-{
+static void trace_series(cairo_t *cr, NetworkSidebarTraffic *self, int series,
+                         gint64 now, int width, int height, double scale,
+                         gboolean close) {
   gboolean drawing = FALSE;
   double first_x = 0, last_x = 0;
   gint64 previous = 0;
@@ -445,8 +432,9 @@ trace_series(cairo_t *cr, NetworkSidebarTraffic *self, int series, gint64 now, i
       previous = sample->time;
       continue;
     }
-    x = width - (now - sample->time) / (double) TRAFFIC_WINDOW_US * width;
-    y = height - 1 - (series == 0 ? sample->rx : sample->tx) / scale * (height - 14);
+    x = width - (now - sample->time) / (double)TRAFFIC_WINDOW_US * width;
+    y = height - 1 -
+        (series == 0 ? sample->rx : sample->tx) / scale * (height - 14);
     /* Break the trace across gaps such as suspend. */
     if (drawing && sample->time - previous > TRAFFIC_GAP_US) {
       if (close) {
@@ -478,9 +466,8 @@ trace_series(cairo_t *cr, NetworkSidebarTraffic *self, int series, gint64 now, i
   }
 }
 
-static void
-draw_live(GtkDrawingArea *area, cairo_t *cr, int width, int height, gpointer user_data)
-{
+static void draw_live(GtkDrawingArea *area, cairo_t *cr, int width, int height,
+                      gpointer user_data) {
   NetworkSidebarTraffic *self = user_data;
   GdkRGBA down, up;
   double peak = 0;
@@ -517,9 +504,8 @@ draw_live(GtkDrawingArea *area, cairo_t *cr, int width, int height, gpointer use
   draw_scale_label(GTK_WIDGET(area), cr, scale_text);
 }
 
-static void
-rounded_top(cairo_t *cr, double x, double y, double width, double height, double radius)
-{
+static void rounded_top(cairo_t *cr, double x, double y, double width,
+                        double height, double radius) {
   radius = MIN(radius, MIN(width / 2, height));
   cairo_move_to(cr, x, y + height);
   cairo_line_to(cr, x, y + radius);
@@ -529,27 +515,28 @@ rounded_top(cairo_t *cr, double x, double y, double width, double height, double
   cairo_close_path(cr);
 }
 
-/* Day slots, oldest first, ending today; NULL for days vnstat has no row for. */
-static const DayUsage *
-day_for_slot(NetworkSidebarTraffic *self, GDateTime *today, int slot)
-{
-  g_autoptr(GDateTime) date = g_date_time_add_days(today, slot - (TRAFFIC_DAYS - 1));
+/* Day slots, oldest first, ending today; NULL for days vnstat has no row for.
+ */
+static const DayUsage *day_for_slot(NetworkSidebarTraffic *self,
+                                    GDateTime *today, int slot) {
+  g_autoptr(GDateTime) date =
+      g_date_time_add_days(today, slot - (TRAFFIC_DAYS - 1));
   for (guint i = 0; i < self->n_days; i++) {
     const DayUsage *day = &self->days[i];
-    if (day->year == g_date_time_get_year(date) && day->month == g_date_time_get_month(date) &&
+    if (day->year == g_date_time_get_year(date) &&
+        day->month == g_date_time_get_month(date) &&
         day->day == g_date_time_get_day_of_month(date))
       return day;
   }
   return NULL;
 }
 
-static void
-draw_days(GtkDrawingArea *area, cairo_t *cr, int width, int height, gpointer user_data)
-{
+static void draw_days(GtkDrawingArea *area, cairo_t *cr, int width, int height,
+                      gpointer user_data) {
   NetworkSidebarTraffic *self = user_data;
   g_autoptr(GDateTime) today = g_date_time_new_now_local();
   GdkRGBA down, up;
-  double peak = 0, scale, slot_width = width / (double) TRAFFIC_DAYS;
+  double peak = 0, scale, slot_width = width / (double)TRAFFIC_DAYS;
   double plot = height - 14;
   g_autofree char *scale_text = NULL;
 
@@ -557,7 +544,7 @@ draw_days(GtkDrawingArea *area, cairo_t *cr, int width, int height, gpointer use
   for (int slot = 0; slot < TRAFFIC_DAYS; slot++) {
     const DayUsage *day = day_for_slot(self, today, slot);
     if (day != NULL)
-      peak = MAX(peak, (double) (day->rx + day->tx));
+      peak = MAX(peak, (double)(day->rx + day->tx));
   }
   if (peak <= 0)
     return;
@@ -580,8 +567,10 @@ draw_days(GtkDrawingArea *area, cairo_t *cr, int width, int height, gpointer use
       cairo_fill(cr);
     }
     if (rx_h >= 0.5) {
-      if (tx_h >= 1) cairo_rectangle(cr, x, base - rx_h, bar, rx_h);
-      else rounded_top(cr, x, base - rx_h, bar, rx_h, 2);
+      if (tx_h >= 1)
+        cairo_rectangle(cr, x, base - rx_h, bar, rx_h);
+      else
+        rounded_top(cr, x, base - rx_h, bar, rx_h, 2);
       set_source_rgba_alpha(cr, &down, 1);
       cairo_fill(cr);
     }
@@ -590,9 +579,8 @@ draw_days(GtkDrawingArea *area, cairo_t *cr, int width, int height, gpointer use
   draw_scale_label(GTK_WIDGET(area), cr, scale_text);
 }
 
-static gboolean
-live_tooltip(GtkWidget *widget, int x, int y, gboolean keyboard, GtkTooltip *tooltip, gpointer user_data)
-{
+static gboolean live_tooltip(GtkWidget *widget, int x, int y, gboolean keyboard,
+                             GtkTooltip *tooltip, gpointer user_data) {
   NetworkSidebarTraffic *self = user_data;
   int width = gtk_widget_get_width(widget);
   const RateSample *best = NULL;
@@ -600,30 +588,31 @@ live_tooltip(GtkWidget *widget, int x, int y, gboolean keyboard, GtkTooltip *too
   g_autofree char *down = NULL;
   g_autofree char *up = NULL;
   g_autofree char *text = NULL;
-  (void) y;
-  (void) keyboard;
+  (void)y;
+  (void)keyboard;
 
   if (self->count == 0 || width <= 0)
     return FALSE;
   now = sample_at(self, self->count - 1)->time;
-  target = now - (gint64) ((width - x) / (double) width * TRAFFIC_WINDOW_US);
+  target = now - (gint64)((width - x) / (double)width * TRAFFIC_WINDOW_US);
   for (guint i = 0; i < self->count; i++) {
     const RateSample *sample = sample_at(self, i);
-    if (best == NULL || llabs(sample->time - target) < llabs(best->time - target))
+    if (best == NULL ||
+        llabs(sample->time - target) < llabs(best->time - target))
       best = sample;
   }
   if (best == NULL || llabs(best->time - target) > TRAFFIC_GAP_US)
     return FALSE;
   down = format_rate(best->rx);
   up = format_rate(best->tx);
-  text = g_strdup_printf("%" G_GINT64_FORMAT " s ago\n↓ %s   ↑ %s", (now - best->time) / G_USEC_PER_SEC, down, up);
+  text = g_strdup_printf("%" G_GINT64_FORMAT " s ago\n↓ %s   ↑ %s",
+                         (now - best->time) / G_USEC_PER_SEC, down, up);
   gtk_tooltip_set_text(tooltip, text);
   return TRUE;
 }
 
-static gboolean
-days_tooltip(GtkWidget *widget, int x, int y, gboolean keyboard, GtkTooltip *tooltip, gpointer user_data)
-{
+static gboolean days_tooltip(GtkWidget *widget, int x, int y, gboolean keyboard,
+                             GtkTooltip *tooltip, gpointer user_data) {
   NetworkSidebarTraffic *self = user_data;
   int width = gtk_widget_get_width(widget);
   g_autoptr(GDateTime) today = g_date_time_new_now_local();
@@ -634,17 +623,18 @@ days_tooltip(GtkWidget *widget, int x, int y, gboolean keyboard, GtkTooltip *too
   g_autofree char *down = NULL;
   g_autofree char *up = NULL;
   g_autofree char *text = NULL;
-  (void) y;
-  (void) keyboard;
+  (void)y;
+  (void)keyboard;
 
   if (width <= 0)
     return FALSE;
-  slot = CLAMP((int) (x / (width / (double) TRAFFIC_DAYS)), 0, TRAFFIC_DAYS - 1);
+  slot = CLAMP((int)(x / (width / (double)TRAFFIC_DAYS)), 0, TRAFFIC_DAYS - 1);
   day = day_for_slot(self, today, slot);
   if (day == NULL)
     return FALSE;
   date = g_date_time_add_days(today, slot - (TRAFFIC_DAYS - 1));
-  label = slot == TRAFFIC_DAYS - 1 ? g_strdup("Today") : g_date_time_format(date, "%a %b %-d");
+  label = slot == TRAFFIC_DAYS - 1 ? g_strdup("Today")
+                                   : g_date_time_format(date, "%a %b %-d");
   down = format_bytes(day->rx);
   up = format_bytes(day->tx);
   text = g_strdup_printf("%s\n↓ %s   ↑ %s", label, down, up);
@@ -652,9 +642,7 @@ days_tooltip(GtkWidget *widget, int x, int y, gboolean keyboard, GtkTooltip *too
   return TRUE;
 }
 
-static GtkWidget *
-caption(const char *text, float xalign)
-{
+static GtkWidget *caption(const char *text, float xalign) {
   GtkWidget *label = gtk_label_new(text);
   gtk_widget_add_css_class(label, "caption");
   gtk_widget_add_css_class(label, "dim-label");
@@ -663,9 +651,8 @@ caption(const char *text, float xalign)
   return label;
 }
 
-static GtkWidget *
-chart(int height, GtkDrawingAreaDrawFunc draw, GCallback tooltip, NetworkSidebarTraffic *self)
-{
+static GtkWidget *chart(int height, GtkDrawingAreaDrawFunc draw,
+                        GCallback tooltip, NetworkSidebarTraffic *self) {
   GtkWidget *area = gtk_drawing_area_new();
   gtk_drawing_area_set_content_height(GTK_DRAWING_AREA(area), height);
   gtk_drawing_area_set_draw_func(GTK_DRAWING_AREA(area), draw, self, NULL);
@@ -674,20 +661,17 @@ chart(int height, GtkDrawingAreaDrawFunc draw, GCallback tooltip, NetworkSidebar
   return area;
 }
 
-static void
-on_dark_changed(GObject *object, GParamSpec *pspec, gpointer user_data)
-{
+static void on_dark_changed(GObject *object, GParamSpec *pspec,
+                            gpointer user_data) {
   NetworkSidebarTraffic *self = user_data;
-  (void) object;
-  (void) pspec;
+  (void)object;
+  (void)pspec;
   update_rate_label(self);
   gtk_widget_queue_draw(self->live_area);
   gtk_widget_queue_draw(self->days_area);
 }
 
-static GtkWidget *
-static_row(GtkWidget *child)
-{
+static GtkWidget *static_row(GtkWidget *child) {
   GtkWidget *row = gtk_list_box_row_new();
   gtk_list_box_row_set_activatable(GTK_LIST_BOX_ROW(row), FALSE);
   gtk_list_box_row_set_selectable(GTK_LIST_BOX_ROW(row), FALSE);
@@ -695,9 +679,7 @@ static_row(GtkWidget *child)
   return row;
 }
 
-static GtkWidget *
-rate_label(void)
-{
+static GtkWidget *rate_label(void) {
   GtkWidget *label = gtk_label_new(NULL);
   gtk_widget_add_css_class(label, "numeric");
   gtk_label_set_xalign(GTK_LABEL(label), 0);
@@ -706,9 +688,7 @@ rate_label(void)
   return label;
 }
 
-NetworkSidebarTraffic *
-network_sidebar_traffic_new(NMClient *client)
-{
+NetworkSidebarTraffic *network_sidebar_traffic_new(NMClient *client) {
   NetworkSidebarTraffic *self = g_new0(NetworkSidebarTraffic, 1);
   GtkWidget *box, *rates, *captions;
 
@@ -731,7 +711,9 @@ network_sidebar_traffic_new(NMClient *client)
    * already carries today's and this month's totals. */
   self->usage_row = g_object_ref_sink(adw_expander_row_new());
   gtk_widget_add_css_class(self->usage_row, "traffic-usage");
-  adw_expander_row_add_prefix(ADW_EXPANDER_ROW(self->usage_row), gtk_image_new_from_icon_name("document-open-recent-symbolic"));
+  adw_expander_row_add_prefix(
+      ADW_EXPANDER_ROW(self->usage_row),
+      gtk_image_new_from_icon_name("document-open-recent-symbolic"));
   box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
   gtk_widget_add_css_class(box, "traffic-days");
   self->days_area = chart(48, draw_days, G_CALLBACK(days_tooltip), self);
@@ -744,16 +726,15 @@ network_sidebar_traffic_new(NMClient *client)
   gtk_widget_set_visible(self->usage_row, FALSE);
 
   update_rate_label(self);
-  g_signal_connect(adw_style_manager_get_default(), "notify::dark", G_CALLBACK(on_dark_changed), self);
+  g_signal_connect(adw_style_manager_get_default(), "notify::dark",
+                   G_CALLBACK(on_dark_changed), self);
 
   take_sample(self);
   restart_sampling(self);
   return self;
 }
 
-void
-network_sidebar_traffic_free(NetworkSidebarTraffic *self)
-{
+void network_sidebar_traffic_free(NetworkSidebarTraffic *self) {
   if (self == NULL)
     return;
   g_signal_handlers_disconnect_by_data(adw_style_manager_get_default(), self);
@@ -768,27 +749,23 @@ network_sidebar_traffic_free(NetworkSidebarTraffic *self)
   g_free(self);
 }
 
-static void
-move_row(GtkWidget *row, GtkListBox *list)
-{
+static void move_row(GtkWidget *row, GtkListBox *list) {
   GtkWidget *parent = gtk_widget_get_parent(row);
   if (GTK_IS_LIST_BOX(parent))
     gtk_list_box_remove(GTK_LIST_BOX(parent), row);
   gtk_list_box_append(list, row);
 }
 
-void
-network_sidebar_traffic_add_rows(NetworkSidebarTraffic *self, GtkListBox *list)
-{
+void network_sidebar_traffic_add_rows(NetworkSidebarTraffic *self,
+                                      GtkListBox *list) {
   if (self == NULL)
     return;
   move_row(self->live_row, list);
   move_row(self->usage_row, list);
 }
 
-void
-network_sidebar_traffic_set_active(NetworkSidebarTraffic *self, gboolean active)
-{
+void network_sidebar_traffic_set_active(NetworkSidebarTraffic *self,
+                                        gboolean active) {
   if (self == NULL || self->active == active)
     return;
   self->active = active;

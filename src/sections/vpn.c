@@ -1,203 +1,199 @@
 #include "sections/vpn.h"
 
-#include "data/connection_state.h"
-#include "data/labels.h"
+#include "data/vpn_profiles.h"
 #include "sections/helpers.h"
 
 typedef struct {
   NetworkSidebarActions *actions;
   NMRemoteConnection *connection;
   NMActiveConnection *active;
+  NetworkSidebarVpnProfileKind kind;
   gboolean can_activate;
 } VpnRowAction;
 
 typedef struct {
-  GHashTable *service_types;
-  gboolean discovery_failed;
-} VpnPluginState;
+  NetworkSidebarActions *actions;
+  GSimpleActionGroup *create_actions;
+  NetworkSidebarProfileEditorPresenter *editor_presenter;
+  /* The expander owns the rows. */
+  AdwExpanderRow *expander;
+  GPtrArray *rows;
+  /* Collapsed unless a VPN is up or connecting; a manual toggle sticks until
+   * that changes. */
+  int user_expanded;
+  gboolean was_active;
+  gulong expanded_handler;
+} VpnSection;
 
-static void
-vpn_row_action_free(VpnRowAction *data)
-{
+static void vpn_section_free(gpointer user_data) {
+  VpnSection *data = user_data;
+
+  g_ptr_array_unref(data->rows);
+  g_object_unref(data->create_actions);
+  network_sidebar_actions_unref(data->actions);
+  network_sidebar_profile_editor_presenter_unref(data->editor_presenter);
+  g_free(data);
+}
+
+static void vpn_section_add_row(VpnSection *data, GtkWidget *row) {
+  adw_expander_row_add_row(data->expander, row);
+  g_ptr_array_add(data->rows, row);
+}
+
+static void vpn_section_add_notice(VpnSection *data, const char *title,
+                                   const char *subtitle) {
+  vpn_section_add_row(data, network_sidebar_action_row(title, subtitle, NULL));
+}
+
+static void vpn_row_action_free(VpnRowAction *data) {
   network_sidebar_actions_unref(data->actions);
   g_clear_object(&data->connection);
   g_clear_object(&data->active);
   g_free(data);
 }
 
-static void
-vpn_row_action_closure_notify(gpointer data, GClosure *closure)
-{
-  (void) closure;
+static void vpn_row_action_closure_notify(gpointer data, GClosure *closure) {
+  (void)closure;
   vpn_row_action_free(data);
 }
 
-static NMActiveConnection *
-active_by_uuid(NMClient *client, const char *uuid)
-{
-  const GPtrArray *active_connections = nm_client_get_active_connections(client);
+static const char *profile_kind_label(NetworkSidebarVpnProfileKind kind) {
+  return kind == NETWORK_SIDEBAR_VPN_PROFILE_WIREGUARD ? "WireGuard" : "VPN";
+}
 
-  if (uuid == NULL)
+static const char *
+activation_reason_label(NetworkSidebarVpnActivationReason reason) {
+  switch (reason) {
+  case NETWORK_SIDEBAR_VPN_ACTIVATION_NETWORKING_DISABLED:
+    return "Enable networking to connect";
+  case NETWORK_SIDEBAR_VPN_ACTIVATION_NO_BASE_CONNECTION:
+    return "VPN needs an active network connection";
+  case NETWORK_SIDEBAR_VPN_ACTIVATION_PLUGIN_MISSING:
+    return "VPN plugin is not installed for this profile";
+  case NETWORK_SIDEBAR_VPN_ACTIVATION_ALLOWED:
     return NULL;
-  for (guint i = 0; active_connections != NULL && i < active_connections->len; i++) {
-    NMActiveConnection *active = g_ptr_array_index((GPtrArray *) active_connections, i);
-    if (g_strcmp0(uuid, nm_active_connection_get_uuid(active)) == 0)
-      return active;
   }
   return NULL;
 }
 
-static void
-on_vpn_row_activated(GtkListBoxRow *row, gpointer user_data)
-{
+static void on_vpn_row_activated(GtkListBoxRow *row, gpointer user_data) {
   VpnRowAction *data = user_data;
-  (void) row;
+  (void)row;
 
   if (data->active != NULL)
     network_sidebar_actions_deactivate(data->actions, data->active);
   else if (!data->can_activate)
     return;
+  else if (data->kind == NETWORK_SIDEBAR_VPN_PROFILE_WIREGUARD)
+    network_sidebar_actions_activate_wireguard_connection(data->actions,
+                                                          data->connection);
   else
-    network_sidebar_actions_activate_vpn_connection(data->actions, data->connection);
+    network_sidebar_actions_activate_vpn_connection(data->actions,
+                                                    data->connection);
 }
 
-static void
-on_vpn_edit_clicked(GtkButton *button, gpointer user_data)
-{
+static void on_vpn_edit_clicked(GtkButton *button, gpointer user_data) {
   VpnRowAction *data = user_data;
-  (void) button;
+  (void)button;
   network_sidebar_actions_edit_connection(data->actions, data->connection);
 }
 
-static void
-on_vpn_remove_clicked(GtkButton *button, gpointer user_data)
-{
+static void on_vpn_remove_clicked(GtkButton *button, gpointer user_data) {
   VpnRowAction *data = user_data;
-  (void) button;
-  network_sidebar_actions_confirm_delete_connection(data->actions, data->connection, "VPN");
+  (void)button;
+  network_sidebar_actions_confirm_delete_connection(
+      data->actions, data->connection, profile_kind_label(data->kind));
 }
 
-static void
-on_create_vpn_clicked(GtkButton *button, gpointer user_data)
-{
-  (void) button;
-  network_sidebar_actions_open_editor(user_data, (const char *const[]) { "--create", "--type=vpn", NULL });
+static void on_import_profile_clicked(GtkButton *button, gpointer user_data) {
+  (void)button;
+  network_sidebar_profile_editor_presenter_import(user_data);
 }
 
-static VpnPluginState
-vpn_plugin_state_load(void)
-{
-  VpnPluginState state = { 0 };
-  GSList *plugins = nm_vpn_plugin_info_list_load();
-  g_auto(GStrv) service_types = NULL;
+static void on_create_profile_activated(GSimpleAction *action,
+                                        GVariant *parameter,
+                                        gpointer user_data) {
+  NetworkSidebarProfileKind kind =
+      g_strcmp0(g_action_get_name(G_ACTION(action)), "wireguard") == 0
+          ? NETWORK_SIDEBAR_PROFILE_WIREGUARD
+          : NETWORK_SIDEBAR_PROFILE_VPN;
+  (void)parameter;
 
-  state.service_types = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
-  if (plugins == NULL)
-    return state;
-
-  service_types = nm_vpn_plugin_info_list_get_service_types(plugins, TRUE, FALSE);
-  for (guint i = 0; service_types != NULL && service_types[i] != NULL; i++)
-    g_hash_table_add(state.service_types, g_strdup(service_types[i]));
-  for (GSList *iter = plugins; iter != NULL; iter = iter->next) {
-    const char *service = nm_vpn_plugin_info_get_service(iter->data);
-    if (service != NULL && *service != '\0')
-      g_hash_table_add(state.service_types, g_strdup(service));
-  }
-  g_slist_free_full(plugins, g_object_unref);
-  return state;
+  network_sidebar_actions_create_profile(user_data, kind);
 }
 
-static void
-vpn_plugin_state_clear(VpnPluginState *state)
-{
-  g_clear_pointer(&state->service_types, g_hash_table_unref);
+static GtkWidget *create_profile_menu(VpnSection *data) {
+  static const GActionEntry entries[] = {
+      {.name = "vpn", .activate = on_create_profile_activated},
+      {.name = "wireguard", .activate = on_create_profile_activated},
+  };
+  GtkWidget *button = gtk_menu_button_new();
+  g_autoptr(GMenu) menu = g_menu_new();
+  g_autoptr(GSimpleActionGroup) action_group = g_simple_action_group_new();
+
+  g_action_map_add_action_entries(G_ACTION_MAP(action_group), entries,
+                                  G_N_ELEMENTS(entries), data->actions);
+  g_object_set_data_full(G_OBJECT(action_group), "nm-sidebar-actions",
+                         network_sidebar_actions_ref(data->actions),
+                         (GDestroyNotify)network_sidebar_actions_unref);
+  data->create_actions = g_object_ref(action_group);
+  g_simple_action_set_enabled(G_SIMPLE_ACTION(g_action_map_lookup_action(
+                                  G_ACTION_MAP(action_group), "vpn")),
+                              FALSE);
+  g_menu_append(menu, "VPN", "create.vpn");
+  g_menu_append(menu, "WireGuard", "create.wireguard");
+  gtk_widget_insert_action_group(button, "create",
+                                 G_ACTION_GROUP(action_group));
+  gtk_menu_button_set_menu_model(GTK_MENU_BUTTON(button), G_MENU_MODEL(menu));
+  gtk_menu_button_set_icon_name(GTK_MENU_BUTTON(button), "list-add-symbolic");
+  gtk_widget_add_css_class(button, "flat");
+  gtk_widget_set_valign(button, GTK_ALIGN_CENTER);
+  gtk_widget_set_tooltip_text(button, "Create VPN or WireGuard");
+  return button;
 }
 
-static gboolean
-vpn_has_base_connection(NMClient *client)
-{
-  const GPtrArray *active_connections = nm_client_get_active_connections(client);
-  for (guint i = 0; active_connections != NULL && i < active_connections->len; i++) {
-    NMActiveConnection *active = g_ptr_array_index((GPtrArray *) active_connections, i);
-    if (!nm_active_connection_get_vpn(active) &&
-        g_strcmp0(nm_active_connection_get_connection_type(active), NM_SETTING_VPN_SETTING_NAME) != 0 &&
-        nm_active_connection_get_state(active) == NM_ACTIVE_CONNECTION_STATE_ACTIVATED)
-      return TRUE;
-  }
-  return FALSE;
+static void on_vpn_expanded(GObject *row, GParamSpec *pspec,
+                            gpointer user_data) {
+  VpnSection *data = user_data;
+  (void)pspec;
+  data->user_expanded = adw_expander_row_get_expanded(ADW_EXPANDER_ROW(row));
 }
 
-static gboolean
-vpn_profile_plugin_available(NMRemoteConnection *connection, const VpnPluginState *state, gboolean *unknown)
-{
-  NMSettingVpn *vpn = nm_connection_get_setting_vpn(NM_CONNECTION(connection));
-  const char *service_type = vpn != NULL ? nm_setting_vpn_get_service_type(vpn) : NULL;
+GtkWidget *network_sidebar_vpn_section_new(
+    NetworkSidebarActions *actions,
+    NetworkSidebarProfileEditorPresenter *editor_presenter) {
+  GtkWidget *group = adw_preferences_group_new();
+  GtkWidget *expander = adw_expander_row_new();
+  GtkWidget *header_suffix = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+  GtkWidget *import_button = network_sidebar_flat_button(
+      "document-open-symbolic", "Import VPN configuration");
+  VpnSection *data = g_new0(VpnSection, 1);
 
-  *unknown = FALSE;
-  if (service_type == NULL || *service_type == '\0') {
-    if (state->discovery_failed) {
-      *unknown = TRUE;
-      return TRUE;
-    }
-    return FALSE;
-  }
-  if (state->service_types != NULL && g_hash_table_contains(state->service_types, service_type))
-    return TRUE;
-  if (state->discovery_failed) {
-    *unknown = TRUE;
-    return TRUE;
-  }
-  return FALSE;
+  data->actions = network_sidebar_actions_ref(actions);
+  data->editor_presenter =
+      network_sidebar_profile_editor_presenter_ref(editor_presenter);
+  data->expander = ADW_EXPANDER_ROW(expander);
+  data->rows = g_ptr_array_new();
+  data->user_expanded = -1;
+  g_signal_connect(import_button, "clicked",
+                   G_CALLBACK(on_import_profile_clicked),
+                   data->editor_presenter);
+  gtk_box_append(GTK_BOX(header_suffix), import_button);
+  gtk_box_append(GTK_BOX(header_suffix), create_profile_menu(data));
+  gtk_widget_set_valign(header_suffix, GTK_ALIGN_CENTER);
+  adw_expander_row_add_suffix(data->expander, header_suffix);
+  adw_preferences_row_set_title(ADW_PREFERENCES_ROW(expander), "VPN");
+  adw_expander_row_add_prefix(
+      data->expander, gtk_image_new_from_icon_name("network-vpn-symbolic"));
+  adw_preferences_group_add(ADW_PREFERENCES_GROUP(group), expander);
+  data->expanded_handler = g_signal_connect(expander, "notify::expanded",
+                                            G_CALLBACK(on_vpn_expanded), data);
+  g_object_set_data_full(G_OBJECT(group), "vpn-section", data,
+                         vpn_section_free);
+  return group;
 }
 
-static gint
-vpn_connection_compare(gconstpointer left, gconstpointer right)
-{
-  NMRemoteConnection *left_connection = *(NMRemoteConnection * const *) left;
-  NMRemoteConnection *right_connection = *(NMRemoteConnection * const *) right;
-  const char *left_id = nm_connection_get_id(NM_CONNECTION(left_connection));
-  const char *right_id = nm_connection_get_id(NM_CONNECTION(right_connection));
-  g_autofree char *left_folded = g_utf8_casefold(left_id != NULL ? left_id : "", -1);
-  g_autofree char *right_folded = g_utf8_casefold(right_id != NULL ? right_id : "", -1);
-  int id_compare = g_strcmp0(left_folded, right_folded);
-
-  if (id_compare != 0)
-    return id_compare;
-  return g_strcmp0(nm_connection_get_uuid(NM_CONNECTION(left_connection)), nm_connection_get_uuid(NM_CONNECTION(right_connection)));
-}
-
-static guint
-vpn_profile_name_count(GPtrArray *profiles, const char *name)
-{
-  guint count = 0;
-
-  for (guint i = 0; profiles != NULL && i < profiles->len; i++) {
-    NMRemoteConnection *connection = g_ptr_array_index(profiles, i);
-    const char *candidate = nm_connection_get_id(NM_CONNECTION(connection));
-    if (g_strcmp0(candidate != NULL && *candidate != '\0' ? candidate : "VPN", name) == 0)
-      count++;
-  }
-  return count;
-}
-
-static char *
-vpn_connection_status(NMActiveConnection *active)
-{
-  if (active == NULL || !NM_IS_VPN_CONNECTION(active))
-    return NULL;
-  switch (nm_vpn_connection_get_vpn_state(NM_VPN_CONNECTION(active))) {
-  case NM_VPN_CONNECTION_STATE_FAILED:
-    return g_strdup("VPN failed");
-  case NM_VPN_CONNECTION_STATE_DISCONNECTED:
-    return g_strdup("VPN disconnected");
-  default:
-    return NULL;
-  }
-}
-
-static char *
-join_subtitle_parts(const char *first, const char *second)
-{
+static char *join_subtitle_parts(const char *first, const char *second) {
   if (first != NULL && *first != '\0' && second != NULL && *second != '\0')
     return g_strdup_printf("%s - %s", first, second);
   if (first != NULL && *first != '\0')
@@ -207,176 +203,146 @@ join_subtitle_parts(const char *first, const char *second)
   return NULL;
 }
 
-/* Collapsed unless a VPN is up or connecting; a manual toggle sticks until
- * that changes. */
-static int vpn_user_expanded = -1;
-static gboolean vpn_was_active;
-
-static void
-on_vpn_expanded(GObject *row, GParamSpec *pspec, gpointer user_data)
-{
-  (void) pspec;
-  (void) user_data;
-  vpn_user_expanded = adw_expander_row_get_expanded(ADW_EXPANDER_ROW(row));
-}
-
-static GtkWidget *
-notice_row(const char *title, const char *subtitle)
-{
-  return network_sidebar_action_row(title, subtitle, NULL);
-}
-
-void
-network_sidebar_add_vpn_group(GtkBox *content, NMClient *client, NetworkSidebarActions *actions)
-{
-  GtkWidget *group = adw_preferences_group_new();
-  GtkWidget *expander = adw_expander_row_new();
-  g_autofree char *summary = NULL;
-  guint profile_count = 0;
-  NMActiveConnection *shown_active = NULL;
-  NetworkSidebarRowState shown_state = NETWORK_SIDEBAR_ROW_STATE_NONE;
-  gboolean any_active;
-  GtkWidget *header_suffix = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
-  GtkWidget *create_button = network_sidebar_flat_button("list-add-symbolic", "Create VPN");
-  const GPtrArray *connections = nm_client_get_connections(client);
-  g_autoptr(GPtrArray) profiles = g_ptr_array_new_with_free_func(g_object_unref);
-  gboolean editor_available = network_sidebar_actions_connection_editor_available();
-  VpnPluginState plugin_state = vpn_plugin_state_load();
-  gboolean plugins_known_missing = !plugin_state.discovery_failed && g_hash_table_size(plugin_state.service_types) == 0;
-  gboolean has_base_connection = vpn_has_base_connection(client);
-  gboolean added = FALSE;
-
-  gtk_widget_set_sensitive(create_button, editor_available && !plugins_known_missing);
-  if (!editor_available)
-    gtk_widget_set_tooltip_text(create_button, "Install nm-connection-editor to create VPN profiles");
-  else if (plugins_known_missing)
-    gtk_widget_set_tooltip_text(create_button, "Install a NetworkManager VPN plugin to create profiles");
-  g_signal_connect(create_button, "clicked", G_CALLBACK(on_create_vpn_clicked), actions);
-  gtk_box_append(GTK_BOX(header_suffix), create_button);
-  gtk_widget_set_valign(header_suffix, GTK_ALIGN_CENTER);
-  adw_expander_row_add_suffix(ADW_EXPANDER_ROW(expander), header_suffix);
-  adw_preferences_row_set_title(ADW_PREFERENCES_ROW(expander), "VPN");
-  adw_expander_row_add_prefix(ADW_EXPANDER_ROW(expander), gtk_image_new_from_icon_name("network-vpn-symbolic"));
-  adw_preferences_group_add(ADW_PREFERENCES_GROUP(group), expander);
-
-  if (!editor_available)
-    adw_expander_row_add_row(ADW_EXPANDER_ROW(expander), notice_row("VPN editor unavailable", "Install nm-connection-editor to import, create, or edit VPN profiles"));
-  if (plugin_state.discovery_failed)
-    adw_expander_row_add_row(ADW_EXPANDER_ROW(expander), notice_row("VPN plugin status unavailable", "Could not verify installed NetworkManager VPN plugins; VPN actions remain available"));
-  else if (plugins_known_missing)
-    adw_expander_row_add_row(ADW_EXPANDER_ROW(expander), notice_row("No VPN plugins installed", "Install a NetworkManager VPN plugin to import, create, or activate VPN profiles"));
-
-  for (guint i = 0; connections != NULL && i < connections->len; i++) {
-    NMRemoteConnection *connection = g_ptr_array_index((GPtrArray *) connections, i);
-    if (g_strcmp0(nm_connection_get_connection_type(NM_CONNECTION(connection)), NM_SETTING_VPN_SETTING_NAME) == 0)
-      g_ptr_array_add(profiles, g_object_ref(connection));
+static void add_connecting_spinner(GtkWidget *row,
+                                   NetworkSidebarRowState state) {
+  if (state == NETWORK_SIDEBAR_ROW_STATE_CONNECTING) {
+    GtkWidget *spinner = adw_spinner_new();
+    gtk_widget_set_size_request(spinner, 16, 16);
+    gtk_widget_set_valign(spinner, GTK_ALIGN_CENTER);
+    adw_action_row_add_suffix(ADW_ACTION_ROW(row), spinner);
   }
-  g_ptr_array_sort(profiles, vpn_connection_compare);
+}
 
-  for (guint i = 0; i < profiles->len; i++) {
-    NMRemoteConnection *connection = g_ptr_array_index(profiles, i);
-    const char *uuid;
-    NMActiveConnection *active;
-    g_autofree char *title = NULL;
+/* The collapsed header summarizes the section: the shown connection, or how
+ * many profiles there are. */
+static void
+vpn_section_update_summary(VpnSection *data,
+                           const NetworkSidebarVpnProfiles *snapshot) {
+  const NetworkSidebarVpnProfile *shown = NULL;
+  NetworkSidebarRowState shown_state = NETWORK_SIDEBAR_ROW_STATE_NONE;
+  g_autofree char *summary = NULL;
+  gboolean any_active;
+  guint count = snapshot->profiles->len;
+
+  for (guint i = 0; i < count; i++) {
+    const NetworkSidebarVpnProfile *profile =
+        g_ptr_array_index(snapshot->profiles, i);
+
+    if (profile->active != NULL &&
+        (shown == NULL ||
+         profile->row_state == NETWORK_SIDEBAR_ROW_STATE_ACTIVE)) {
+      shown = profile;
+      shown_state = profile->row_state;
+    }
+  }
+
+  any_active = shown_state == NETWORK_SIDEBAR_ROW_STATE_ACTIVE ||
+               shown_state == NETWORK_SIDEBAR_ROW_STATE_CONNECTING;
+  if (shown != NULL)
+    summary = g_strdup_printf("%s: %s",
+                              shown_state == NETWORK_SIDEBAR_ROW_STATE_ACTIVE
+                                  ? "Connected"
+                                  : "Connecting",
+                              shown->name);
+  else if (count == 0 &&
+           snapshot->plugin_status == NETWORK_SIDEBAR_VPN_PLUGIN_MISSING)
+    summary = g_strdup("No VPN plugins installed");
+  else
+    summary = g_strdup_printf("%u profile%s", count, count == 1 ? "" : "s");
+  adw_expander_row_set_subtitle(data->expander, summary);
+  network_sidebar_apply_row_state(GTK_WIDGET(data->expander), shown_state);
+
+  if (any_active != data->was_active)
+    data->user_expanded = -1;
+  data->was_active = any_active;
+  g_signal_handler_block(data->expander, data->expanded_handler);
+  adw_expander_row_set_expanded(data->expander, data->user_expanded >= 0
+                                                    ? data->user_expanded
+                                                    : any_active);
+  g_signal_handler_unblock(data->expander, data->expanded_handler);
+}
+
+void network_sidebar_vpn_section_update(GtkWidget *section, NMClient *client) {
+  VpnSection *data = g_object_get_data(G_OBJECT(section), "vpn-section");
+  g_autoptr(NetworkSidebarVpnProfiles) snapshot =
+      network_sidebar_vpn_profiles_load(client);
+
+  /* Preserve the header, action group, and mapped popover across refreshes. */
+  g_simple_action_set_enabled(G_SIMPLE_ACTION(g_action_map_lookup_action(
+                                  G_ACTION_MAP(data->create_actions), "vpn")),
+                              snapshot->can_create_vpn);
+  for (guint i = 0; i < data->rows->len; i++)
+    adw_expander_row_remove(data->expander, g_ptr_array_index(data->rows, i));
+  g_ptr_array_set_size(data->rows, 0);
+
+  if (snapshot->plugin_status == NETWORK_SIDEBAR_VPN_PLUGIN_UNKNOWN)
+    vpn_section_add_notice(data, "VPN plugin status unavailable",
+                           "Could not check installed VPN plugins; "
+                           "VPN actions remain available");
+  else if (snapshot->plugin_status == NETWORK_SIDEBAR_VPN_PLUGIN_MISSING)
+    vpn_section_add_notice(
+        data, "No VPN plugins installed",
+        "Install a NetworkManager VPN plugin; WireGuard remains available");
+
+  for (guint i = 0; i < snapshot->profiles->len; i++) {
+    const NetworkSidebarVpnProfile *profile =
+        g_ptr_array_index(snapshot->profiles, i);
     g_autofree char *subtitle = NULL;
     GtkWidget *row;
     GtkWidget *edit_button;
     GtkWidget *remove_button;
     VpnRowAction *row_action;
-    gboolean plugin_unknown = FALSE;
-    gboolean plugin_available;
-    gboolean can_activate;
-    g_autofree char *activation_note = NULL;
+    const char *activation_note =
+        activation_reason_label(profile->activation_reason);
     g_autofree char *duplicate_note = NULL;
-    g_autofree char *status = NULL;
 
-    uuid = nm_connection_get_uuid(NM_CONNECTION(connection));
-    active = active_by_uuid(client, uuid);
-    title = network_sidebar_connection_name(NM_CONNECTION(connection), "VPN");
-    if (vpn_profile_name_count(profiles, title) > 1 && uuid != NULL)
-      duplicate_note = g_strdup_printf("UUID %s", uuid);
-    plugin_available = vpn_profile_plugin_available(connection, &plugin_state, &plugin_unknown);
-    if (active == NULL && !nm_client_networking_get_enabled(client))
-      activation_note = g_strdup("Networking is disabled");
-    else if (active == NULL && !has_base_connection)
-      activation_note = g_strdup("VPN needs an active network connection");
-    else if (active == NULL && !plugin_available)
-      activation_note = g_strdup("VPN plugin is not installed for this profile");
-    can_activate = active != NULL || activation_note == NULL;
-    status = vpn_connection_status(active);
-    subtitle = activation_note != NULL ? join_subtitle_parts(activation_note, duplicate_note) : join_subtitle_parts(status, duplicate_note);
-    row = network_sidebar_action_row(title, subtitle, "network-vpn-symbolic");
-    network_sidebar_apply_row_state(row, network_sidebar_vpn_row_state(active));
+    if (profile->duplicate_name && profile->uuid != NULL)
+      duplicate_note = g_strdup_printf("UUID %s", profile->uuid);
+    subtitle = join_subtitle_parts(profile->status, duplicate_note);
+    row = network_sidebar_action_row(profile->name, subtitle,
+                                     "network-vpn-symbolic");
+    network_sidebar_apply_row_state(row, profile->row_state);
     if (activation_note != NULL)
       gtk_widget_set_tooltip_text(row, activation_note);
 
     row_action = g_new0(VpnRowAction, 1);
-    row_action->actions = network_sidebar_actions_ref(actions);
-    row_action->connection = g_object_ref(connection);
-    row_action->active = active != NULL ? g_object_ref(active) : NULL;
-    row_action->can_activate = can_activate;
+    row_action->actions = network_sidebar_actions_ref(data->actions);
+    row_action->connection = g_object_ref(profile->connection);
+    row_action->active =
+        profile->active != NULL ? g_object_ref(profile->active) : NULL;
+    row_action->kind = profile->kind;
+    row_action->can_activate = profile->can_activate;
 
     edit_button = network_sidebar_flat_button("document-edit-symbolic", "Edit");
-    if (!editor_available)
-      gtk_widget_set_tooltip_text(edit_button, "Install nm-connection-editor to edit VPN profiles");
-    else if (!plugin_available)
-      gtk_widget_set_tooltip_text(edit_button, "Install the NetworkManager VPN plugin for this profile");
-    else if (plugin_unknown)
-      gtk_widget_set_tooltip_text(edit_button, "VPN plugin support could not be verified");
-    gtk_widget_set_sensitive(edit_button, editor_available && plugin_available);
-    g_signal_connect(edit_button, "clicked", G_CALLBACK(on_vpn_edit_clicked), row_action);
+    if (profile->plugin_status == NETWORK_SIDEBAR_VPN_PLUGIN_MISSING)
+      gtk_widget_set_tooltip_text(
+          edit_button,
+          "Install the NetworkManager VPN plugin for this profile");
+    else if (profile->plugin_status == NETWORK_SIDEBAR_VPN_PLUGIN_UNKNOWN)
+      gtk_widget_set_tooltip_text(edit_button,
+                                  "VPN plugin support could not be verified");
+    gtk_widget_set_sensitive(edit_button, profile->can_edit);
+    g_signal_connect(edit_button, "clicked", G_CALLBACK(on_vpn_edit_clicked),
+                     row_action);
     adw_action_row_add_suffix(ADW_ACTION_ROW(row), edit_button);
 
-    remove_button = network_sidebar_flat_button("user-trash-symbolic", "Remove");
-    g_signal_connect(remove_button, "clicked", G_CALLBACK(on_vpn_remove_clicked), row_action);
+    remove_button =
+        network_sidebar_flat_button("user-trash-symbolic", "Remove");
+    g_signal_connect(remove_button, "clicked",
+                     G_CALLBACK(on_vpn_remove_clicked), row_action);
     adw_action_row_add_suffix(ADW_ACTION_ROW(row), remove_button);
 
-    gtk_list_box_row_set_activatable(GTK_LIST_BOX_ROW(row), can_activate);
-    g_signal_connect_data(row, "activated", G_CALLBACK(on_vpn_row_activated), row_action, vpn_row_action_closure_notify, 0);
-    if (network_sidebar_vpn_row_state(active) == NETWORK_SIDEBAR_ROW_STATE_CONNECTING)
-      {
-      GtkWidget *spinner = adw_spinner_new();
-      gtk_widget_set_size_request(spinner, 16, 16);
-      gtk_widget_set_valign(spinner, GTK_ALIGN_CENTER);
-      adw_action_row_add_suffix(ADW_ACTION_ROW(row), spinner);
-    }
-    if (active != NULL && (shown_active == NULL || network_sidebar_vpn_row_state(active) == NETWORK_SIDEBAR_ROW_STATE_ACTIVE)) {
-      shown_active = active;
-      shown_state = network_sidebar_vpn_row_state(active);
-    }
-    adw_expander_row_add_row(ADW_EXPANDER_ROW(expander), row);
-    profile_count++;
-    added = TRUE;
+    gtk_list_box_row_set_activatable(GTK_LIST_BOX_ROW(row),
+                                     profile->can_activate);
+    g_signal_connect_data(row, "activated", G_CALLBACK(on_vpn_row_activated),
+                          row_action, vpn_row_action_closure_notify, 0);
+    add_connecting_spinner(row, profile->row_state);
+    vpn_section_add_row(data, row);
   }
 
-  if (!added) {
-    const char *empty_subtitle;
+  if (snapshot->profiles->len == 0)
+    vpn_section_add_notice(data, "No VPN profiles",
+                           "Use Import or + to add one");
 
-    if (editor_available && !plugins_known_missing)
-      empty_subtitle = "Use Import or Create to add one";
-    else if (!editor_available)
-      empty_subtitle = "Install nm-connection-editor to add one";
-    else
-      empty_subtitle = "Install a NetworkManager VPN plugin to add one";
-    adw_expander_row_add_row(ADW_EXPANDER_ROW(expander), notice_row("No VPN profiles", empty_subtitle));
-  }
-
-  any_active = shown_state == NETWORK_SIDEBAR_ROW_STATE_ACTIVE || shown_state == NETWORK_SIDEBAR_ROW_STATE_CONNECTING;
-  if (shown_active != NULL)
-    summary = g_strdup_printf("%s: %s", shown_state == NETWORK_SIDEBAR_ROW_STATE_ACTIVE ? "Connected" : "Connecting",
-                              nm_active_connection_get_id(shown_active));
-  else if (plugins_known_missing)
-    summary = g_strdup("No VPN plugins installed");
-  else
-    summary = g_strdup_printf("%u profile%s", profile_count, profile_count == 1 ? "" : "s");
-  adw_expander_row_set_subtitle(ADW_EXPANDER_ROW(expander), summary);
-  network_sidebar_apply_row_state(expander, shown_state);
-  if (any_active != vpn_was_active)
-    vpn_user_expanded = -1;
-  vpn_was_active = any_active;
-  adw_expander_row_set_expanded(ADW_EXPANDER_ROW(expander), vpn_user_expanded >= 0 ? vpn_user_expanded : any_active);
-  g_signal_connect(expander, "notify::expanded", G_CALLBACK(on_vpn_expanded), NULL);
-
-  gtk_box_append(content, group);
-  vpn_plugin_state_clear(&plugin_state);
+  vpn_section_update_summary(data, snapshot);
 }
