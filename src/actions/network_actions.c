@@ -804,9 +804,17 @@ static void finish_scan_request_cb(GObject *source, GAsyncResult *result,
   if (!nm_device_wifi_request_scan_finish(NM_DEVICE_WIFI(source), result,
                                           &error)) {
     const char *iface = nm_device_get_iface(NM_DEVICE(source));
+    /* NetworkManager refuses scans while the adapter is connecting,
+     * disconnecting or roaming. With iwd, a station stuck in "disconnecting"
+     * keeps refusing until Wi-Fi is turned off and on. */
+    const char *hint =
+        g_error_matches(error, NM_DEVICE_ERROR, NM_DEVICE_ERROR_NOT_ALLOWED)
+            ? ". Wi-Fi is busy connecting or disconnecting; if this persists, "
+              "turn Wi-Fi off and on"
+            : "";
     g_autofree char *message = g_strdup_printf(
-        "Could not scan %s: %s", iface != NULL ? iface : "Wi-Fi",
-        error != NULL ? error->message : "unknown error");
+        "Could not scan %s: %s%s", iface != NULL ? iface : "Wi-Fi",
+        error != NULL ? error->message : "unknown error", hint);
     g_free(actions->wifi_scan_error);
     actions->wifi_scan_error = g_strdup(message);
     toast(actions, message);
@@ -1034,8 +1042,33 @@ void network_sidebar_actions_activate_saved_wifi_profile_on_device(
     NMDeviceWifi *device, NMAccessPoint *ap) {
   g_autofree char *name =
       network_sidebar_connection_name(NM_CONNECTION(connection), "Wi-Fi");
-  AsyncAction *async = async_action_new(actions, name);
+  NMActiveConnection *current =
+      nm_device_get_active_connection(NM_DEVICE(device));
+  AsyncAction *async;
 
+  /* The row may predate an activation that iwd's autoconnect began (a network
+   * that just appeared in a scan). Activating it again makes iwd abort its
+   * own attempt, which can leave the station stuck in "disconnecting". */
+  if (current != NULL &&
+      NM_CONNECTION(nm_active_connection_get_connection(current)) ==
+          NM_CONNECTION(connection) &&
+      nm_active_connection_get_state(current) >=
+          NM_ACTIVE_CONNECTION_STATE_ACTIVATING &&
+      nm_active_connection_get_state(current) <=
+          NM_ACTIVE_CONNECTION_STATE_ACTIVATED) {
+    g_autofree char *message = g_strdup_printf(
+        "Already %s %s",
+        nm_active_connection_get_state(current) ==
+                NM_ACTIVE_CONNECTION_STATE_ACTIVATED
+            ? "connected to"
+            : "connecting to",
+        name);
+    toast(actions, message);
+    schedule_refresh(actions, 1);
+    return;
+  }
+
+  async = async_action_new(actions, name);
   async->is_wifi = TRUE;
   async->retry_wifi_auth = TRUE;
   async->wifi_device = g_object_ref(device);

@@ -364,12 +364,23 @@ static gboolean ensure_nm_client(NetworkSidebarGuiApp *self) {
 static AdwToast *toast_callback(const char *message, gpointer user_data) {
   NetworkSidebarGuiApp *self = user_data;
   AdwToast *toast;
+  GtkWidget *label;
 
   if (self->toast_overlay == NULL || self->window == NULL ||
       !gtk_widget_get_visible(self->window))
     return NULL;
 
+  /* AdwToast ellipsizes its title to one line, which cuts NetworkManager's
+   * errors off; a wrapping label shows the whole message. Capping its natural
+   * width makes the toast measure the wrapped height. */
+  label = gtk_label_new(message);
+  gtk_label_set_wrap(GTK_LABEL(label), TRUE);
+  gtk_label_set_wrap_mode(GTK_LABEL(label), PANGO_WRAP_WORD_CHAR);
+  gtk_label_set_xalign(GTK_LABEL(label), 0.0f);
+  gtk_label_set_max_width_chars(GTK_LABEL(label), 40);
+  gtk_widget_add_css_class(label, "heading");
   toast = adw_toast_new(message);
+  adw_toast_set_custom_title(toast, label);
   adw_toast_overlay_add_toast(ADW_TOAST_OVERLAY(self->toast_overlay),
                               g_object_ref(toast));
   return toast;

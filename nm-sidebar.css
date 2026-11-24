@@ -95,3 +95,5 @@ dialog.nm-sidebar-dialog bottom-sheet > dimming {
 .traffic-days { padding: 8px 12px 6px; }
 .traffic-usage { font-feature-settings: "tnum"; }
 .network-search-empty { padding: 12px; }
+/* Wrapped toasts: the stock pill radius would round them into a stadium. */
+toast { border-radius: 18px; }
