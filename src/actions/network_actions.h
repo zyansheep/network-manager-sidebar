@@ -40,6 +40,12 @@ void network_sidebar_actions_set_networking_enabled(
     NetworkSidebarActions *actions, gboolean enabled);
 void network_sidebar_actions_set_wireless_enabled(
     NetworkSidebarActions *actions, gboolean enabled);
+/* iwd station state; see data/iwd_station.h. */
+const char *
+network_sidebar_actions_get_wifi_busy_state(NetworkSidebarActions *actions);
+gboolean network_sidebar_actions_get_wifi_stuck(NetworkSidebarActions *actions,
+                                                gint64 *out_seconds);
+void network_sidebar_actions_restart_wifi(NetworkSidebarActions *actions);
 void network_sidebar_actions_request_scan(NetworkSidebarActions *actions);
 void network_sidebar_actions_rescan(NetworkSidebarActions *actions);
 void network_sidebar_actions_schedule_refresh(NetworkSidebarActions *actions,

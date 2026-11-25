@@ -1104,6 +1104,30 @@ static gboolean wifi_device_activated(NMClient *client) {
   return FALSE;
 }
 
+static void on_restart_wifi_clicked(GtkButton *button, gpointer user_data) {
+  gtk_widget_set_sensitive(GTK_WIDGET(button), FALSE);
+  network_sidebar_actions_restart_wifi(user_data);
+}
+
+/* iwd lost the end of a disconnect; only powering the device down clears it.
+ */
+static void add_stuck_notice(AdwPreferencesGroup *group,
+                             NetworkSidebarActions *actions) {
+  GtkWidget *row = network_sidebar_action_row(
+      "Wi-Fi is stuck disconnecting",
+      "iwd never finished a disconnect, so it refuses scans and connections "
+      "until Wi-Fi restarts",
+      NULL);
+  GtkWidget *button = gtk_button_new_with_label("Restart Wi-Fi");
+
+  gtk_widget_set_valign(button, GTK_ALIGN_CENTER);
+  gtk_widget_add_css_class(button, "suggested-action");
+  g_signal_connect(button, "clicked", G_CALLBACK(on_restart_wifi_clicked),
+                   actions);
+  adw_action_row_add_suffix(ADW_ACTION_ROW(row), button);
+  adw_preferences_group_add(group, row);
+}
+
 static GtkWidget *discard_group(GtkWidget *group) {
   g_object_unref(g_object_ref_sink(group));
   return NULL;
@@ -1136,6 +1160,8 @@ GtkWidget *network_sidebar_add_wifi_group(GtkBox *content, NMClient *client,
   gboolean wifi_usable = nm_client_networking_get_enabled(client) &&
                          nm_client_wireless_hardware_get_enabled(client) &&
                          nm_client_wireless_get_enabled(client);
+  const char *busy_state =
+      wifi_usable ? network_sidebar_actions_get_wifi_busy_state(actions) : NULL;
 
   /* Scanning shows as a spinner where the rescan button sits. */
   if (wifi_usable &&
@@ -1148,8 +1174,15 @@ GtkWidget *network_sidebar_add_wifi_group(GtkBox *content, NMClient *client,
     gtk_widget_set_margin_end(spinner, 9);
     gtk_box_append(GTK_BOX(header), spinner);
   } else if (wifi_usable) {
-    GtkWidget *rescan = network_sidebar_flat_button("view-refresh-symbolic",
-                                                    "Scan for networks");
+    g_autofree char *busy_tooltip =
+        busy_state != NULL
+            ? g_strdup_printf("Scanning is unavailable while Wi-Fi is %s",
+                              busy_state)
+            : NULL;
+    GtkWidget *rescan = network_sidebar_flat_button(
+        "view-refresh-symbolic",
+        busy_tooltip != NULL ? busy_tooltip : "Scan for networks");
+    gtk_widget_set_sensitive(rescan, busy_state == NULL);
     g_signal_connect(rescan, "clicked", G_CALLBACK(on_rescan_clicked), actions);
     gtk_box_append(GTK_BOX(header), rescan);
   }
@@ -1205,6 +1238,8 @@ GtkWidget *network_sidebar_add_wifi_group(GtkBox *content, NMClient *client,
                ? networks
                : discard_group(networks);
   }
+  if (network_sidebar_actions_get_wifi_stuck(actions, NULL))
+    add_stuck_notice(ADW_PREFERENCES_GROUP(group), actions);
 
   entries = build_wifi_entries(client);
   if (entries->len == 0 && saved_profiles->len == 0) {

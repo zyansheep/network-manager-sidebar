@@ -96,6 +96,7 @@ core_sources = [
 
 data_sources = [
   'src/data/connection_state.c',
+  'src/data/iwd_station.c',
   'src/data/labels.c',
   'src/data/vpn_profiles.c',
 ]

@@ -1,5 +1,6 @@
 #include "actions/network_actions.h"
 
+#include "data/iwd_station.h"
 #include "data/labels.h"
 #include "sections/connection-settings.h"
 #include "sections/helpers.h"
@@ -28,6 +29,7 @@ struct _NetworkSidebarActions {
   char *wifi_scan_error;
   gint64 last_scan_us;
   GHashTable *activation_watches;
+  NetworkSidebarIwdStation *iwd;
 };
 
 typedef struct {
@@ -70,6 +72,10 @@ static void prompt_wifi_password(NetworkSidebarActions *actions,
                                  NMDeviceWifi *device, NMAccessPoint *ap,
                                  NMRemoteConnection *saved_wifi);
 
+static void iwd_station_changed(gpointer user_data) {
+  schedule_refresh(user_data, 1);
+}
+
 NetworkSidebarActions *network_sidebar_actions_new(
     NMClient *client, NetworkSidebarToastCallback toast_cb,
     NetworkSidebarScheduleRefreshCallback schedule_refresh_cb,
@@ -83,6 +89,9 @@ NetworkSidebarActions *network_sidebar_actions_new(
   actions->user_data = user_data;
   actions->activation_watches = g_hash_table_new_full(
       g_str_hash, g_str_equal, g_free, (GDestroyNotify)activation_watch_free);
+#if USES_IWD
+  actions->iwd = network_sidebar_iwd_station_new(iwd_station_changed, actions);
+#endif
   return actions;
 }
 
@@ -100,6 +109,7 @@ void network_sidebar_actions_unref(NetworkSidebarActions *actions) {
   if (actions->wifi_scan_settle_source != 0)
     g_source_remove(actions->wifi_scan_settle_source);
   g_free(actions->wifi_scan_error);
+  g_clear_pointer(&actions->iwd, network_sidebar_iwd_station_free);
   g_clear_pointer(&actions->activation_watches, g_hash_table_unref);
   g_clear_object(&actions->client);
   g_free(actions);
@@ -786,6 +796,37 @@ void network_sidebar_actions_set_wireless_enabled(
   g_timeout_add(1200, verify_wifi_state_cb, verify);
 }
 
+const char *
+network_sidebar_actions_get_wifi_busy_state(NetworkSidebarActions *actions) {
+  return actions != NULL
+             ? network_sidebar_iwd_station_get_busy_state(actions->iwd)
+             : NULL;
+}
+
+gboolean network_sidebar_actions_get_wifi_stuck(NetworkSidebarActions *actions,
+                                                gint64 *out_seconds) {
+  return actions != NULL &&
+         network_sidebar_iwd_station_is_stuck(actions->iwd, out_seconds);
+}
+
+static gboolean restart_wifi_enable_cb(gpointer user_data) {
+  NetworkSidebarActions *actions = user_data;
+
+  network_sidebar_actions_set_wireless_enabled(actions, TRUE);
+  network_sidebar_actions_unref(actions);
+  return G_SOURCE_REMOVE;
+}
+
+/* Turning Wi-Fi off powers the iwd device down, which drops a station stuck
+ * in "disconnecting"; turning it back on starts a fresh one. */
+void network_sidebar_actions_restart_wifi(NetworkSidebarActions *actions) {
+  toast(actions, "Restarting Wi-Fi");
+  nm_client_wireless_set_enabled(actions->client, FALSE);
+  schedule_refresh(actions, 500);
+  g_timeout_add(2000, restart_wifi_enable_cb,
+                network_sidebar_actions_ref(actions));
+}
+
 static gboolean finish_scan_settle_cb(gpointer user_data) {
   NetworkSidebarActions *actions = user_data;
   actions->wifi_scan_settle_source = 0;
@@ -835,6 +876,10 @@ void network_sidebar_actions_request_scan(NetworkSidebarActions *actions) {
   gint64 now = g_get_monotonic_time();
 
   if (actions->wifi_scan_in_progress)
+    return;
+  /* NetworkManager refuses scans while iwd is not connected or disconnected;
+   * the Wi-Fi header says why instead. */
+  if (network_sidebar_iwd_station_get_busy_state(actions->iwd) != NULL)
     return;
   if (actions->last_scan_us != 0 &&
       now - actions->last_scan_us < WIFI_SCAN_THROTTLE_SECONDS * G_USEC_PER_SEC)
@@ -1047,8 +1092,9 @@ void network_sidebar_actions_activate_saved_wifi_profile_on_device(
   AsyncAction *async;
 
   /* The row may predate an activation that iwd's autoconnect began (a network
-   * that just appeared in a scan). Activating it again makes iwd abort its
-   * own attempt, which can leave the station stuck in "disconnecting". */
+   * that just appeared in a scan). Activating it again makes NetworkManager
+   * tear that attempt down with Station.Disconnect and start over, and iwd has
+   * been seen stuck in "disconnecting" after exactly such a disconnect. */
   if (current != NULL &&
       NM_CONNECTION(nm_active_connection_get_connection(current)) ==
           NM_CONNECTION(connection) &&
